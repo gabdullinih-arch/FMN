@@ -1,0 +1,9 @@
+node_modules/
+**/target/
+app/gen/
+app/frontend/bundle.js
+
+*.log
+out_*.txt
+.DS_Store
+Thumbs.db

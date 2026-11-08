@@ -1,0 +1,24 @@
+{
+  "name": "fmn",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Незабудка / Forget-me-not (FMN)",
+  "scripts": {
+    "build": "esbuild src/main.jsx --bundle --minify --loader:.jsx=jsx --jsx=automatic --format=iife --target=chrome100,safari15 --outfile=app/frontend/bundle.js",
+    "test": "npm run build && node tests-frontend/intervals.test.mjs && node tests-frontend/template-range.test.mjs && node tests-frontend/recurring-scenarios.test.mjs && node tests-frontend/i18n.test.mjs && node tests-frontend/planscript.test.mjs && node tests-frontend/mock-backend-smoke-test.mjs && node tests-frontend/move-scenario-test.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-fs": "^2",
+    "@tauri-apps/plugin-notification": "^2",
+    "lucide-react": "0.383.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1"
+  }
+}

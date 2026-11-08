@@ -1,0 +1,19 @@
+[package]
+name = "planner-storage"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "planner_storage"
+path = "src/lib.rs"
+
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+anyhow = "1"
