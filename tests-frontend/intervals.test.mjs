@@ -71,8 +71,19 @@ test("empty patch acts as clear", () => {
 test("findIntervalAt / readCellValue", () => {
   const day = [{ startMin: 540, endMin: 600, text: "Бег", color: "", task: "", description: "", catId: null, subId: null, done: false, moved: false }];
   assert.equal(findIntervalAt(day, 550).text, "Бег");
+  assert.equal(findIntervalAt(day, 540).text, "Бег", "startMin включается");
   assert.equal(findIntervalAt(day, 600), null, "endMin не включается (полуоткрытый интервал)");
+  assert.equal(findIntervalAt(day, 539), null, "значение до интервала не совпадает");
   assert.deepEqual(readCellValue(day, 700), EMPTY_CELL);
+});
+
+test("findIntervalAt находит интервал в большом отсортированном списке", () => {
+  const day = Array.from({ length: 288 }, (_, index) => iv(index * 5, index * 5 + 5, { text: `Блок ${index}` }));
+  assert.equal(findIntervalAt(day, 0).text, "Блок 0");
+  assert.equal(findIntervalAt(day, 715).text, "Блок 143");
+  assert.equal(findIntervalAt(day, 719).text, "Блок 143");
+  assert.equal(findIntervalAt(day, 720).text, "Блок 144");
+  assert.equal(findIntervalAt(day, 1440), null);
 });
 
 test("заголовок остаётся одним в непрерывном сегменте той же заливки", () => {

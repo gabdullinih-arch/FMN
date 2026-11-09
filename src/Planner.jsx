@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo, useTransition, startTransition, Fragment } from "react";
 import {
-  Loader2, X, Download, Upload, Undo2,
+  X, Download, Upload, Undo2,
   Search, Type, PaintBucket, MousePointer2, CalendarClock,
   Copy, ClipboardPaste, CalendarDays, ClipboardCheck, LayoutTemplate,
   ZoomIn, ZoomOut, Eraser, Palette, Settings2, ChevronsLeft,
   ListChecks, BookOpen, ListTodo, CalendarPlus, ChevronUp, ChevronDown, Pipette, NotebookPen, Repeat,
-  Code2,
+  Code2, CalendarRange,
 } from "lucide-react";
 
 import { WEEKDAYS_SHORT, MONTHS_NOM, DEFAULT_COLORS, DEFAULT_CATEGORIES, VIEW_ZOOM_STEPS, BASE_UNIT } from "./constants.js";
@@ -60,6 +60,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ScriptPanel } from "./components/ScriptPanel.jsx";
 import { formatPlanScriptValue, runPlanScript, runPlanWatch } from "./script/interpreter.js";
 import { parse as parsePlanScript } from "./script/parser.js";
+import forgetMeNotIcon from "../app/app-icon.png";
 
 /* ------------------------------------------------------------------ */
 /*  Main app                                                           */
@@ -134,8 +135,7 @@ function PlannerContent() {
   const [weeksData, setWeeksData] = useState({});
   const [mountedWeeks, setMountedWeeks] = useState(() => {
     const cur = toISO(getMonday(new Date()));
-    const next = toISO(addDays(getMonday(new Date()), 7));
-    return { [cur]: true, [next]: true };
+    return { [cur]: true };
   });
   const [year, setYear] = useState(REAL_YEAR);
   // Года, которые пользователь сам завёл (селектор года и плитки "годы"
@@ -146,6 +146,15 @@ function PlannerContent() {
   const [createdYears, setCreatedYears] = useState([REAL_YEAR]);
   const [createYearModalOpen, setCreateYearModalOpen] = useState(false);
   const [createYearInput, setCreateYearInput] = useState("");
+  const [clearRangeScope, setClearRangeScope] = useState("week");
+  const [clearRangeAnchor, setClearRangeAnchor] = useState("");
+  const [clearRangeMonth, setClearRangeMonth] = useState(new Date().getMonth());
+  const [clearRangeYear, setClearRangeYear] = useState(REAL_YEAR);
+  const [clearRangeStart, setClearRangeStart] = useState("");
+  const [clearRangeEnd, setClearRangeEnd] = useState("");
+  const [clearRangeAdditional, setClearRangeAdditional] = useState([]);
+  const [clearRangeBusy, setClearRangeBusy] = useState(false);
+  const [clearRangeError, setClearRangeError] = useState("");
   const [selection, setSelection] = useState(null);
   const [highlight, setHighlight] = useState(null);
   const [dayHighlight, setDayHighlight] = useState(null);
@@ -243,9 +252,7 @@ function PlannerContent() {
   computeWeekStatsRef.current = computeWeekStats;
 
   const mondayCur = getMonday(new Date());
-  const mondayNext = addDays(mondayCur, 7);
   const isoCur = toISO(mondayCur);
-  const isoNext = toISO(mondayNext);
   const yearList = useMemo(() => weeksOfYear(year), [year]);
   const weekCellMin = useCallback((iso) => weeksDataRef.current[iso]?.cellMin ?? settingsRef.current.cellMin, []);
   const weekDayStart = useCallback((iso) => weeksDataRef.current[iso]?.dayStart ?? settingsRef.current.dayStart, []);
@@ -269,6 +276,8 @@ function PlannerContent() {
     setToast(t(msg, language));
     setTimeout(() => setToast(null), 2600);
   }, [language]);
+  const showToastRef = useRef(showToast);
+  showToastRef.current = showToast;
 
   const updateWeeksData = useCallback((updater) => {
     const next = typeof updater === "function" ? updater(weeksDataRef.current) : updater;
@@ -312,13 +321,14 @@ function PlannerContent() {
   // если на ней прямо сейчас активное перетаскивание/заливка/выделение -
   // такое совпадение маловероятно (неделя уже далеко за экраном), но
   // на всякий случай подстраховываемся, чтобы не оборвать жест на полпути.
-  const handleWeekVisible = useCallback((iso) => {
+  const handleWeekVisible = useCallback((iso, isStillNear) => {
     // Монтирование новой недели при скролле - при мелком шаге клетки
     // (10/5 мин) это сотни компонентов на одну неделю; при быстром
     // скролле такие монтирования идут одно за другим почти без пауз.
     // startTransition даёт скроллу/следующим кадрам приоритет выше,
     // чем этой довольно тяжёлой, но не срочной подгрузке контента.
     ensureLoadedData(iso).then(() => {
+      if (!isStillNear()) return;
       startTransition(() => { setMountedWeeks((p) => ({ ...p, [iso]: true })); });
     }).catch((error) => {
       console.error(`Could not load week ${iso}`, error);
@@ -336,77 +346,87 @@ function PlannerContent() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const loadInBackground = (label, request, apply) => {
+      request.then((value) => {
+        if (active) apply(value);
+      }).catch((error) => {
+        console.error(`Could not load ${label}`, error);
+        if (active) showToastRef.current(`Не удалось загрузить ${label}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    };
+
     (async () => {
-      // Настройки - теперь одна строка в SQLite, а не JSON-блок; поля те
-      // же самые, просто читаем через типизированную Tauri-команду.
-      const s = await fetchSettings();
+      const [s, [cats, subs]] = await Promise.all([
+        fetchSettings(),
+        Promise.all([listCategories(), listSubcategories()]),
+        ensureLoadedData(isoCur),
+      ]);
+      if (!active) return;
+
       const merged = { dayStart: s.dayStart, dayEnd: s.dayEnd, cellMin: s.cellMin, zoom: s.zoom, theme: s.theme, notificationsEnabled: s.notificationsEnabled, notifyLeadMin: s.notifyLeadMin };
       settingsRef.current = merged;
       setSettings(merged);
       if (s.lastAllDayNotifyDate) lastAllDayNotifyDateRef.current = s.lastAllDayNotifyDate;
-
-      // Категории + подкатегории - раньше subs жили вложенным массивом
-      // прямо в JSON категории, теперь это отдельная таблица - собираем
-      // обратно в ту же вложенную форму, которую ждёт CategoryPanel.jsx.
-      const [cats, subs] = await Promise.all([listCategories(), listSubcategories()]);
       setCategories(cats.map((c) => ({
         ...c,
         subs: subs.filter((s2) => s2.categoryId === c.id).map((s2) => ({ id: s2.id, name: s2.name, description: s2.description })),
       })));
       categoriesLoadedRef.current = true;
 
-      const tpl = await listTemplates();
-      setTemplates(tpl.map((t) => ({ id: t.id, name: t.name, type: t.kind, ...JSON.parse(t.data || "{}") })));
-
-      const rr = await listRecurringRules();
-      setRecurringRules(rr.map((r) => ({
-        id: r.id, name: r.name, dayIdx: r.dayIdx, startMin: r.startMin, durationMin: r.durationMin,
-        catId: r.catId, subId: r.subId, color: r.color, task: r.task,
-        patternType: r.patternType, customRanges: r.customRanges, anchorIso: r.anchorMonday, weeksCount: r.weeksCount,
-        conflictMode: r.conflictMode === "overwrite" ? "templateWins" : (r.conflictMode || "keepExisting"),
-      })));
-
-      const savedWatchers = await listPlanScriptWatchers();
-      setPlanWatchers(Array.isArray(savedWatchers) ? savedWatchers : []);
-
-      const td = await listTodos();
-      setTodos(td);
-
-      const ad = await listAllAllDayEvents();
-      const loadedAllDayEvents = ad.map((e) => ({ id: e.id, text: e.text, catId: e.catId, color: e.color, startIso: e.startDate, endIso: e.endDate }));
-      allDayEventsRef.current = loadedAllDayEvents;
-      setAllDayEvents(loadedAllDayEvents);
-      allDayEventsLoadedRef.current = true;
-
-      // Подписи недель - раньше единый объект {iso: label}, теперь
-      // запрашиваем диапазон (весь реалистичный горизонт навигации).
-      const labelPairs = await getWeekLabels("1900-01-01", "2200-01-01");
-      setWeekNumbers(Object.fromEntries(labelPairs));
-
-      // Года - миграция из старого data.json в createdYears теперь
-      // делает Rust ОДИН РАЗ сам (migrate_from_old_json - см. lib.rs),
-      // включая сканирование старых week:* ключей "на всякий случай".
-      // Фронтенду достаточно просто прочитать уже готовый список.
-      let years = await listCreatedYears();
-      if (years.length === 0) {
-        await addCreatedYear(REAL_YEAR);
-        years = [REAL_YEAR];
-      }
-      setCreatedYears(years);
-
-      await Promise.all([ensureLoadedData(isoCur), ensureLoadedData(isoNext)]);
       setLoading(false);
       requestAnimationFrame(() => requestAnimationFrame(() => {
         const el = weekRefs.current[isoCur];
         if (el) el.scrollIntoView({ behavior: "auto", block: "start" });
       }));
+
+      loadInBackground("шаблоны", listTemplates(), (items) => {
+        const loaded = items.map((item) => ({ id: item.id, name: item.name, type: item.kind, ...JSON.parse(item.data || "{}") }));
+        setTemplates((prev) => [...new Map([...loaded, ...prev].map((item) => [item.id, item])).values()]);
+      });
+      loadInBackground("повторяющиеся события", listRecurringRules(), (items) => {
+        const loaded = items.map((r) => ({
+          id: r.id, name: r.name, dayIdx: r.dayIdx, startMin: r.startMin, durationMin: r.durationMin,
+          catId: r.catId, subId: r.subId, color: r.color, task: r.task,
+          patternType: r.patternType, customRanges: r.customRanges, anchorIso: r.anchorMonday, weeksCount: r.weeksCount,
+          conflictMode: r.conflictMode === "overwrite" ? "templateWins" : (r.conflictMode || "keepExisting"),
+        }));
+        setRecurringRules((prev) => [...new Map([...loaded, ...prev].map((item) => [item.id, item])).values()]);
+      });
+      loadInBackground("наблюдатели PlanScript", listPlanScriptWatchers(), (items) => {
+        setPlanWatchers((prev) => [...new Map([...(Array.isArray(items) ? items : []), ...prev].map((item) => [item.id, item])).values()]);
+      });
+      loadInBackground("список задач", listTodos(), (items) => {
+        setTodos((prev) => [...new Map([...items, ...prev].map((item) => [item.id, item])).values()]);
+      });
+      loadInBackground("события на весь день", listAllAllDayEvents(), (items) => {
+        const loaded = items.map((event) => ({ id: event.id, text: event.text, catId: event.catId, color: event.color, startIso: event.startDate, endIso: event.endDate }));
+        const mergedEvents = [...new Map([...loaded, ...allDayEventsRef.current].map((event) => [event.id, event])).values()];
+        allDayEventsRef.current = mergedEvents;
+        setAllDayEvents(mergedEvents);
+        allDayEventsLoadedRef.current = true;
+      });
+      loadInBackground("подписи недель", getWeekLabels("1900-01-01", "2200-01-01"), (pairs) => {
+        const loaded = Object.fromEntries(pairs);
+        setWeekNumbers((prev) => ({ ...loaded, ...prev }));
+      });
+      loadInBackground("список годов", listCreatedYears().then(async (items) => {
+        if (items.length === 0) {
+          await addCreatedYear(REAL_YEAR);
+          return [REAL_YEAR];
+        }
+        return items;
+      }), (items) => {
+        setCreatedYears((prev) => [...new Set([...items, ...prev])].sort((a, b) => a - b));
+      });
     })().catch((error) => {
       console.error("Не удалось загрузить данные приложения:", error);
-      setStartupError(error instanceof Error ? error.message : String(error));
+      if (active) setStartupError(error instanceof Error ? error.message : String(error));
     }).finally(() => {
-      setLoading(false);
+      if (active) setLoading(false);
     });
-  }, []);
+    return () => { active = false; };
+  }, [ensureLoadedData, isoCur]);
 
   useEffect(() => {
     if (activeDockPanel !== "script" || scriptsLoadedRef.current) return;
@@ -563,7 +583,7 @@ function PlannerContent() {
           return next;
         });
         maybeRefreshTracker();
-        showToast("Операция с шаблоном отменена");
+        showToast("Операция отменена");
       } catch (error) {
         historyRef.current.push(last);
         setHistoryCount(historyRef.current.length);
@@ -726,6 +746,140 @@ function PlannerContent() {
     maybeRefreshTracker();
     showToast("Неделя очищена");
   }, [updateWeeksData, showToast, maybeRefreshTracker, flushPendingWeekWrites]);
+
+  const openClearRangeDialog = useCallback((scope = "week") => {
+    const anchor = hoveredWeekIsoRef.current || isoCur;
+    const monday = new Date(`${anchor}T00:00:00`);
+    setClearRangeAnchor(anchor);
+    setClearRangeMonth(monday.getMonth());
+    setClearRangeYear(monday.getFullYear());
+    setClearRangeStart(anchor);
+    setClearRangeEnd(toISO(addDays(monday, 6)));
+    setClearRangeAdditional([]);
+    setClearRangeScope(scope);
+    setClearRangeError("");
+    setViewMode(scope === "week" ? "weekTiles" : scope === "month" ? "months" : scope === "year" ? "years" : "weeks");
+    if (scope === "month") setYear(monday.getFullYear());
+    setActiveDockPanel("clearRange");
+  }, [isoCur]);
+
+  const setClearRangeMode = useCallback((scope) => {
+    setClearRangeScope(scope);
+    setClearRangeError("");
+    setViewMode(scope === "week" ? "weekTiles" : scope === "month" ? "months" : scope === "year" ? "years" : "weeks");
+    if (scope === "month") setYear(clearRangeYear);
+  }, [clearRangeYear]);
+
+  const clearRangeDates = useMemo(() => {
+    if (clearRangeScope === "week" && clearRangeAnchor) {
+      const monday = new Date(`${clearRangeAnchor}T00:00:00`);
+      return [{ start: clearRangeAnchor, end: toISO(addDays(monday, 6)) }];
+    }
+    if (clearRangeScope === "month") {
+      const leapYear = clearRangeYear % 4 === 0 && (clearRangeYear % 100 !== 0 || clearRangeYear % 400 === 0);
+      const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      return [{
+        start: `${String(clearRangeYear).padStart(4, "0")}-${pad(clearRangeMonth + 1)}-01`,
+        end: `${String(clearRangeYear).padStart(4, "0")}-${pad(clearRangeMonth + 1)}-${pad(monthDays[clearRangeMonth])}`,
+      }];
+    }
+    if (clearRangeScope === "year") {
+      return [{
+        start: `${String(clearRangeYear).padStart(4, "0")}-01-01`,
+        end: `${String(clearRangeYear).padStart(4, "0")}-12-31`,
+      }];
+    }
+    return [{ start: clearRangeStart, end: clearRangeEnd }, ...clearRangeAdditional];
+  }, [clearRangeAdditional, clearRangeAnchor, clearRangeEnd, clearRangeMonth, clearRangeScope, clearRangeStart, clearRangeYear]);
+
+  const clearCalendarRange = useCallback(async () => {
+    const validIsoDate = (value) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const year = Number(value.slice(0, 4));
+      if (year < 1 || year > 9999) return false;
+      const parsed = new Date(`${value}T00:00:00`);
+      const normalized = `${String(parsed.getFullYear()).padStart(4, "0")}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`;
+      return Number.isFinite(parsed.getTime()) && normalized === value;
+    };
+    if (clearRangeDates.some(({ start, end }) => !validIsoDate(start) || !validIsoDate(end) || start > end)) {
+      setClearRangeError(t("Проверьте даты: начало должно быть не позже конца."));
+      return;
+    }
+
+    const weekStartSet = new Set();
+    clearRangeDates.forEach(({ start, end }) => {
+      const firstMonday = getMonday(new Date(`${start}T00:00:00`));
+      const lastMonday = getMonday(new Date(`${end}T00:00:00`));
+      for (let monday = firstMonday; monday <= lastMonday; monday = addDays(monday, 7)) {
+        weekStartSet.add(toISO(monday));
+      }
+    });
+    const weekStarts = [...weekStartSet].sort();
+    if (weekStarts.length > 520) {
+      setClearRangeError(t("За один раз можно очистить не более 520 недель."));
+      return;
+    }
+
+    setClearRangeBusy(true);
+    setClearRangeError("");
+    try {
+      await ensureLoadedWeeks(weekStarts);
+      for (const iso of weekStarts) await flushPendingWeekWrites(iso);
+
+      const affectedDays = weekStarts.reduce((count, iso) => {
+        const week = weeksDataRef.current[iso];
+        if (!week) throw new Error(`Не загружена неделя ${iso}`);
+        const monday = new Date(`${iso}T00:00:00`);
+        return count + week.days.reduce((dayCount, intervals, dayIdx) => {
+          const date = toISO(addDays(monday, dayIdx));
+          const included = clearRangeDates.some((range) => date >= range.start && date <= range.end);
+          return dayCount + (included && intervals.length > 0 ? 1 : 0);
+        }, 0);
+      }, 0);
+      if (affectedDays === 0) {
+        setActiveDockPanel(null);
+        showToast(t("В выбранном диапазоне нет записей."));
+        return;
+      }
+
+      const snapshots = weekStarts.map((iso) => {
+        const week = weeksDataRef.current[iso];
+        if (!week) throw new Error(`Не загружена неделя ${iso}`);
+        return { monday: iso, days: week.days.map((intervals) => intervals.slice()) };
+      });
+      const clearedSnapshots = snapshots.map((snapshot) => {
+        const iso = snapshot.monday;
+        const monday = new Date(`${iso}T00:00:00`);
+        return {
+          monday: iso,
+          days: snapshot.days.map((intervals, dayIdx) => {
+            const date = toISO(addDays(monday, dayIdx));
+            return clearRangeDates.some((range) => date >= range.start && date <= range.end) ? [] : intervals;
+          }),
+        };
+      });
+
+      await restoreWeeks(clearedSnapshots);
+      historyRef.current.push({ kind: "multiWeek", snapshots });
+      if (historyRef.current.length > 40) historyRef.current.shift();
+      setHistoryCount(historyRef.current.length);
+      updateWeeksData((previous) => {
+        const next = { ...previous };
+        clearedSnapshots.forEach((snapshot) => {
+          next[snapshot.monday] = { ...previous[snapshot.monday], days: snapshot.days };
+        });
+        return next;
+      });
+      maybeRefreshTracker();
+      setActiveDockPanel(null);
+      showToast(t("Календарный диапазон очищен. Отмена: Ctrl+Z."));
+    } catch (error) {
+      console.error("Could not clear calendar date range", error);
+      setClearRangeError(`${t("Не удалось очистить календарный диапазон:")} ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setClearRangeBusy(false);
+    }
+  }, [clearRangeDates, ensureLoadedWeeks, flushPendingWeekWrites, maybeRefreshTracker, showToast, updateWeeksData]);
 
   const changeWeekQuantum = useCallback(async (iso, value) => {
     const cellMin = value === "" ? null : Number(value);
@@ -1609,6 +1763,7 @@ function PlannerContent() {
       if (mod && code === "KeyZ" && mode !== "text") { e.preventDefault(); undo(); return; }
       if (mod && code === "KeyK") { e.preventDefault(); setCommandPaletteOpen((v) => !v); return; }
       if (e.key === "Escape" && lockedScrollDirRef.current) { setLockedScrollDir(null); return; }
+      if (e.key === "Escape" && activeDockPanel === "clearRange" && !clearRangeBusy) { setActiveDockPanel(null); return; }
       if (e.key === "Escape" && weekSnapLockRef.current) { setWeekSnapLock(false); return; }
       if (e.key === "Escape" && pendingMoveRef.current) { cancelPendingMove(); return; }
       if (e.key === "Escape" && eyedropperActiveRef.current) { setEyedropperActive(false); return; }
@@ -1700,6 +1855,7 @@ function PlannerContent() {
         case "KeyG": toggleDock("glossary"); break;
         case "KeyS": toggleDock("settings"); break;
         case "KeyF": toggleDock("search"); break;
+        case "KeyE": activeDockPanel === "clearRange" ? setActiveDockPanel(null) : openClearRangeDialog(); break;
         case "KeyQ": setWeekSnapLock((v) => !v); break;
         case "KeyI": setEyedropperActive((v) => !v); break;
         case "Home": goToCurrentWeek(); break;
@@ -1712,7 +1868,7 @@ function PlannerContent() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mode, undo, copySelection, pasteSelection, goToCurrentWeek, zoomBy, previewMoveBy, commitPendingMove, cancelPendingMove, jumpToRelativeWeek, fullscreenWeekIso]);
+  }, [mode, undo, copySelection, pasteSelection, goToCurrentWeek, zoomBy, previewMoveBy, commitPendingMove, cancelPendingMove, jumpToRelativeWeek, fullscreenWeekIso, activeDockPanel, clearRangeBusy, openClearRangeDialog]);
 
   function updateSettings(patch) {
     const prev = settingsRef.current;
@@ -3173,6 +3329,7 @@ function PlannerContent() {
   // (см. KeyTips по Alt) - тут они просто продублированы для поиска.
   const commands = [
     { id: "today", label: "К текущей неделе", hotkey: "Home", action: goToCurrentWeek },
+    { id: "clear-range", label: t("Инструмент очистки периода"), hotkey: "E", keywords: "удалить стереть month year range", action: () => openClearRangeDialog() },
     { id: "next-week", label: "Следующая неделя", hotkey: "]", action: () => jumpToRelativeWeek(1) },
     { id: "prev-week", label: "Предыдущая неделя", hotkey: "[", action: () => jumpToRelativeWeek(-1) },
     { id: "mode-text", label: "Режим: Текст", hotkey: "1", action: () => setMode("text") },
@@ -3195,7 +3352,7 @@ function PlannerContent() {
     { id: "open-recurring", label: "Открыть: Повторяющиеся события", hotkey: "P", action: () => setActiveDockPanel("recurring") },
     { id: "open-script", label: "Открыть: PlanScript", hotkey: "X", keywords: "скрипт сценарий автоматизация", action: () => setActiveDockPanel("script") },
     { id: "open-glossary", label: "Открыть: Глоссарий и хоткеи", hotkey: "G", action: () => setActiveDockPanel("glossary") },
-    { id: "open-settings", label: "Открыть: Настройки сетки", hotkey: "S", action: () => setActiveDockPanel("settings") },
+    { id: "open-settings", label: "Открыть: Настройки", hotkey: "S", action: () => setActiveDockPanel("settings") },
     { id: "open-search", label: "Открыть: Поиск / экспорт", hotkey: "F", action: () => setActiveDockPanel("search") },
     { id: "export-json", label: "Экспорт всех данных в JSON", keywords: "скачать бэкап", action: exportData },
     { id: "export-ics", label: "Экспорт событий года в .ics", keywords: "календарь ical", action: exportICS },
@@ -3208,7 +3365,36 @@ function PlannerContent() {
     return (
       <div className={`planner-root ${spaceScrollLock ? "space-scroll-lock" : ""} ${eyedropperActive ? "eyedropper-active" : ""}`} data-theme={settings.theme}>
         <GlobalStyles />
-        <div className="loading-state"><Loader2 size={18} className="spin" /> Загрузка...</div>
+        <div className="startup-loading" role="status" aria-label="Загрузка календаря">
+          <div className="startup-loading-brand">
+            <img src={forgetMeNotIcon} className="startup-flower-spin" alt="" />
+            <div className="startup-loading-copy">
+              <strong>Незабудка</strong>
+              <span>Готовим календарь...</span>
+            </div>
+          </div>
+          <div className="startup-skeleton-card" aria-hidden="true">
+            <div className="startup-skeleton-title">
+              <span className="startup-skeleton-shimmer startup-skeleton-title-mark" />
+              <span className="startup-skeleton-shimmer startup-skeleton-title-text" />
+              <span className="startup-skeleton-shimmer startup-skeleton-title-date" />
+            </div>
+            <div className="startup-skeleton-grid">
+              <div className="startup-skeleton-row startup-skeleton-days">
+                <span />
+                {Array.from({ length: 7 }, (_, index) => <span key={index}><i className="startup-skeleton-shimmer" /></span>)}
+              </div>
+              {Array.from({ length: 8 }, (_, row) => (
+                <div className="startup-skeleton-row" key={row}>
+                  <span><i className="startup-skeleton-shimmer" /></span>
+                  {Array.from({ length: 7 }, (_, day) => (
+                    <span key={day}>{(row + day) % 4 === 0 && <i className="startup-skeleton-shimmer" />}</span>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -3260,12 +3446,12 @@ function PlannerContent() {
       {toast && <div className="toast">{toast}</div>}
       {lockedScrollDir && (
         <div className={`autoscroll-indicator autoscroll-indicator-${lockedScrollDir}`} onClick={() => setLockedScrollDir(null)}>
-          Автопрокрутка {lockedScrollDir === "up" ? "вверх" : "вниз"} - клик, чтобы остановить
+          {t(`Автопрокрутка ${lockedScrollDir === "up" ? "вверх" : "вниз"} - клик, чтобы остановить`)}
         </div>
       )}
       {weekSnapLock && (
         <div className="autoscroll-indicator autoscroll-indicator-snap" onClick={() => setWeekSnapLock(false)}>
-          Прокрутка по неделям - Q или клик, чтобы выключить
+          {t("Прокрутка по неделям - Q или клик, чтобы выключить")}
         </div>
       )}
       {commandPaletteOpen && (
@@ -3339,7 +3525,6 @@ function PlannerContent() {
           </div>
         </div>
       )}
-
       <div className="planner-header">
         <div className="titlebar">
           <div className="titlebar-left">
@@ -3465,6 +3650,9 @@ function PlannerContent() {
           onToggleMark={toggleWeekMark}
           onSetWeekNumber={setWeekNumber}
           onOpenWeek={(iso) => { setViewMode("weeks"); jumpToDate(new Date(iso + "T00:00:00")); }}
+          selectionMode={activeDockPanel === "clearRange" && clearRangeScope === "week"}
+          selectedWeekIso={clearRangeAnchor}
+          onSelectWeek={(iso) => setClearRangeAnchor(iso)}
         />
       )}
       {viewMode === "weeks" && (
@@ -3614,6 +3802,120 @@ function PlannerContent() {
                     onToggleWeekTileView={() => setViewMode((v) => (v === "weekTiles" ? "weeks" : "weekTiles"))}
                   />
                 )}
+                {activeDockPanel === "clearRange" && (
+                  <div className="clear-range-panel">
+                    <div className="dock-panel-title-row">
+                      <CalendarRange size={15} />
+                      <span>{t("Очистка календаря")}</span>
+                    </div>
+                    <div className="hint-text">{t("Выберите масштаб календаря и период, затем нажмите «Очистить».")}</div>
+                    {clearRangeScope === "week" && <div className="hint-text">{t("Выберите неделю на плитках календаря.")}</div>}
+                    <div className="clear-range-mode-grid" role="group" aria-label={t("Масштаб и период очистки")}>
+                      {[
+                        ["week", "Неделя"],
+                        ["month", "Месяц"],
+                        ["year", "Год"],
+                        ["custom", "Произвольный"],
+                      ].map(([scope, label]) => (
+                        <button
+                          key={scope}
+                          type="button"
+                          className={`segmented-option ${clearRangeScope === scope ? "active" : ""}`}
+                          aria-pressed={clearRangeScope === scope}
+                          onClick={() => setClearRangeMode(scope)}
+                        >
+                          {t(label)}
+                        </button>
+                      ))}
+                    </div>
+                    {(clearRangeScope === "month" || clearRangeScope === "year") && (
+                      <div className="clear-range-period-fields">
+                        {clearRangeScope === "month" && (
+                          <label className="clear-range-field">
+                            <span className="field-label">{t("Месяц")}</span>
+                            <select className="time-input" value={clearRangeMonth} onChange={(e) => setClearRangeMonth(Number(e.target.value))}>
+                              {MONTHS_NOM.map((month, index) => <option key={month} value={index}>{t(month)}</option>)}
+                            </select>
+                          </label>
+                        )}
+                        <label className="clear-range-field">
+                          <span className="field-label">{t("Год")}</span>
+                          <input
+                            type="number"
+                            min="1"
+                            max="9999"
+                            className="time-input"
+                            value={clearRangeYear}
+                            onChange={(e) => {
+                              const nextYear = e.target.value === "" ? 0 : Number(e.target.value);
+                              setClearRangeYear(nextYear);
+                              if (clearRangeScope === "month" && nextYear >= 1 && nextYear <= 9999) setYear(nextYear);
+                            }}
+                          />
+                        </label>
+                      </div>
+                    )}
+                    {clearRangeScope === "custom" && (
+                      <div className="clear-range-custom-ranges">
+                        {[{ start: clearRangeStart, end: clearRangeEnd }, ...clearRangeAdditional].map((range, index) => (
+                          <div className="clear-range-custom-row" key={`range-${index}`}>
+                            <label className="clear-range-field">
+                              <span className="field-label">{t("С даты")}</span>
+                              <input
+                                type="date"
+                                className="time-input"
+                                value={range.start}
+                                onChange={(e) => {
+                                  if (index === 0) setClearRangeStart(e.target.value);
+                                  else setClearRangeAdditional((previous) => previous.map((item, itemIndex) => itemIndex === index - 1 ? { ...item, start: e.target.value } : item));
+                                }}
+                              />
+                            </label>
+                            <label className="clear-range-field">
+                              <span className="field-label">{t("По дату включительно")}</span>
+                              <input
+                                type="date"
+                                className="time-input"
+                                value={range.end}
+                                onChange={(e) => {
+                                  if (index === 0) setClearRangeEnd(e.target.value);
+                                  else setClearRangeAdditional((previous) => previous.map((item, itemIndex) => itemIndex === index - 1 ? { ...item, end: e.target.value } : item));
+                                }}
+                              />
+                            </label>
+                            {index > 0 && (
+                              <button
+                                type="button"
+                                className="icon-btn subtle clear-range-remove"
+                                title={t("Удалить этот интервал")}
+                                aria-label={t("Удалить этот интервал")}
+                                onClick={() => setClearRangeAdditional((previous) => previous.filter((_, itemIndex) => itemIndex !== index - 1))}
+                              >
+                                <X size={15} />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        <button type="button" className="btn btn-ghost btn-sm clear-range-add" onClick={() => setClearRangeAdditional((previous) => [...previous, { start: "", end: "" }])}>
+                          <CalendarPlus size={14} /> {t("Добавить интервал")}
+                        </button>
+                      </div>
+                    )}
+                    <div className="clear-range-summary">
+                      <CalendarRange size={16} aria-hidden="true" />
+                      <div>
+                        {clearRangeDates.map((range, index) => (
+                          <div key={`preview-${index}`}>{clearRangeDates.length > 1 ? `${index + 1}. ` : ""}{range.start || "—"} — {range.end || "—"}</div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="clear-range-warning">{t("Удаляются только записи в клетках календаря. События на весь день и дела без времени не затрагиваются. Операцию можно отменить через Ctrl+Z.")}</div>
+                    {clearRangeError && <div className="clear-range-error" role="alert">{clearRangeError}</div>}
+                    <button type="button" onClick={clearCalendarRange} disabled={clearRangeBusy} className="btn btn-danger btn-sm clear-range-apply">
+                      <Eraser size={14} /> {clearRangeBusy ? t("Очищаем...") : t("Очистить выбранные периоды")}
+                    </button>
+                  </div>
+                )}
                 {activeDockPanel === "recurring" && (
                   <RecurringPanel
                     categories={categories}
@@ -3649,8 +3951,8 @@ function PlannerContent() {
                 {activeDockPanel === "settings" && (
                   <div className="dock-settings-panel">
                     <div className="dock-panel-title-row">
-                      <span>Настройки сетки</span>
-                      {isSettingsPending && <span className="hint-text" style={{ marginLeft: 8 }}>пересчитываю сетку...</span>}
+                      <span>{t("Настройки")}</span>
+                      {isSettingsPending && <span className="hint-text" style={{ marginLeft: 8 }}>{t("пересчитываю сетку...")}</span>}
                     </div>
                     <div className="settings-col">
                       <LanguageSelector />
@@ -3753,11 +4055,14 @@ function PlannerContent() {
             <button onClick={() => setActiveDockPanel((p) => (p === "glossary" ? null : "glossary"))} className={`dock-rail-btn ${activeDockPanel === "glossary" ? "active" : ""}`} title="Глоссарий и горячие клавиши (G)">
               {keyTip("G")}<BookOpen size={17} />
             </button>
-            <button onClick={() => setActiveDockPanel((p) => (p === "settings" ? null : "settings"))} className={`dock-rail-btn ${activeDockPanel === "settings" ? "active" : ""}`} title="Настройки сетки (S)">
-              {keyTip("S")}<Settings2 size={17} />
-            </button>
             <button onClick={() => setActiveDockPanel((p) => (p === "search" ? null : "search"))} className={`dock-rail-btn ${activeDockPanel === "search" ? "active" : ""}`} title="Поиск и календарь (F)">
               {keyTip("F")}<Search size={17} />
+            </button>
+            <button onClick={() => activeDockPanel === "clearRange" ? setActiveDockPanel(null) : openClearRangeDialog()} className={`dock-rail-btn ${activeDockPanel === "clearRange" ? "active" : ""}`} title={`${t("Инструмент очистки периода")} (E)`}>
+              {keyTip("E")}<CalendarRange size={17} />
+            </button>
+            <button onClick={() => setActiveDockPanel((p) => (p === "settings" ? null : "settings"))} className={`dock-rail-btn ${activeDockPanel === "settings" ? "active" : ""}`} title={`${t("Настройки")} (S)`}>
+              {keyTip("S")}<Settings2 size={17} />
             </button>
             <div className="dock-rail-peek" title="Инструменты (наведите)"><ChevronsLeft size={12} /></div>
           </div>

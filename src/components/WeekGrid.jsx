@@ -1,10 +1,12 @@
-import { memo, useRef, useEffect, useState, Fragment } from "react";
+import { memo, useRef, useEffect, useState, useMemo, Fragment } from "react";
 import { Eraser, NotebookPen, Expand, Minimize2, SlidersHorizontal, ChevronDown } from "lucide-react";
 import { WEEKDAYS_SHORT } from "../constants.js";
 import { pad, toISO, addDays, getMonday, formatRange, minToTime } from "../utils.js";
+import { useI18n, t } from "../i18n.js";
 import { readCellValue, EMPTY_CELL, isSameBrushRun, brushHeaderKey, resolveBrushRunHeader, shouldHideRepeatedHeader } from "../intervals.js";
 import { Cell } from "./Cell.jsx";
 import { AllDayRow } from "./AllDayEvents.jsx";
+import forgetMeNotIcon from "../../app/app-icon.png";
 
 export const WeekGrid = memo(function WeekGrid({
   label, monday, weekData, settings, mode, isCurrentWeek, gridRef, iso,
@@ -27,6 +29,7 @@ export const WeekGrid = memo(function WeekGrid({
   // список уже готовых, непересекающихся "прогонов" от Rust, а не плоский
   // квантовый словарь. Никакого cellData.js/compactCells/expandCells больше нет.
   const days = weekData.days || [[], [], [], [], [], [], []];
+  const categoriesById = useMemo(() => new Map(categories.map((category) => [category.id, category])), [categories]);
   const gridStyle = {
     gridTemplateColumns: colTemplate,
     userSelect: mode === "select" || mode === "paint" ? "none" : "auto",
@@ -204,7 +207,7 @@ export const WeekGrid = memo(function WeekGrid({
                 if (raw.text && raw.color) headersByBrushByCol[dayIdx].set(brushHeaderKey(raw), raw.text);
                 if (displayRaw.text && !isContinuation) lastHeaderByCol[dayIdx] = displayRaw.text;
                 lastRunByCol[dayIdx] = raw;
-                const category = c.catId ? categories.find((cc) => cc.id === c.catId) : null;
+                const category = c.catId ? categoriesById.get(c.catId) || null : null;
                 return (
                   <Cell
                     key={`${dayIdx}-${rowIdx}`}
@@ -251,29 +254,34 @@ export function LazyWeek({
   watchIndicators,
 }) {
   const wrapperRef = useRef(null);
+  const nearViewportRef = useRef(false);
+  const [nearViewport, setNearViewport] = useState(false);
   const [showTimeControls, setShowTimeControls] = useState(false);
+  const { language } = useI18n();
 
   useEffect(() => { registerRef(iso, wrapperRef.current); }, []);
 
-  // Монтирование - узкий буфер (700px): неделя появляется в DOM чуть
-  // раньше, чем реально попадёт в кадр, чтобы не мигать пустым местом.
-  // Небольшая задержка (150мс) перед самим монтированием - при быстром
-  // скролле насквозь курсор границы буфера пересекают сразу много недель
-  // подряд; без задержки каждая из них тут же запускает тяжёлый рендер
-  // (особенно при мелком шаге клетки - сотни ячеек на неделю), и эти
-  // рендеры накладываются друг на друга. Если неделя пересекла границу
-  // и тут же уехала дальше (пользователь просто пролистывает, а не
-  // останавливается), монтирование отменяется - незачем было начинать.
+  // Render the lightweight placeholder immediately, but defer the expensive
+  // calendar grid until scrolling settles near this week.
   const mountTimerRef = useRef(null);
   useEffect(() => {
     const el = wrapperRef.current;
     if (!el || mounted) return;
     const obs = new IntersectionObserver(([entry]) => {
       if (entry.isIntersecting) {
-        if (!mountTimerRef.current) mountTimerRef.current = setTimeout(() => { mountTimerRef.current = null; onVisible(iso); }, 150);
-      } else if (mountTimerRef.current) {
-        clearTimeout(mountTimerRef.current);
-        mountTimerRef.current = null;
+        nearViewportRef.current = true;
+        setNearViewport(true);
+        if (!mountTimerRef.current) mountTimerRef.current = setTimeout(() => {
+          mountTimerRef.current = null;
+          onVisible(iso, () => nearViewportRef.current);
+        }, 120);
+      } else {
+        nearViewportRef.current = false;
+        setNearViewport(false);
+        if (mountTimerRef.current) {
+          clearTimeout(mountTimerRef.current);
+          mountTimerRef.current = null;
+        }
       }
     }, { rootMargin: "700px 0px" });
     obs.observe(el);
@@ -312,9 +320,23 @@ export function LazyWeek({
   const approxHeight = 104 + Math.min(Math.ceil((settings.dayEnd - settings.dayStart) / settings.cellMin) * 24, 460);
 
   const wrapperClass = `week-lazy-wrapper ${fullscreen ? "week-fullscreen-wrapper" : ""}`;
-  if (!mounted || !weekData) return <div ref={wrapperRef} className={wrapperClass} style={{ height: approxHeight, marginBottom: 16 }} />;
+  if (!mounted || !weekData) return (
+    <div ref={wrapperRef} data-week-iso={iso} className={`${wrapperClass} ${nearViewport ? "week-lazy-near" : ""}`} style={{ height: approxHeight, marginBottom: 16 }}>
+      {nearViewport && (
+        <div className="week-loading-card" role="status" aria-label={t("Загружается неделя", language)}>
+          <div className="week-loading-brand">
+            <img src={forgetMeNotIcon} className="week-loading-flower" alt="" />
+            <span className="week-loading-shimmer week-loading-label" />
+          </div>
+          <div className="week-loading-columns" aria-hidden="true">
+            {Array.from({ length: 7 }, (_, index) => <span className="week-loading-shimmer" key={index} />)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
   return (
-    <div ref={wrapperRef} className={wrapperClass}>
+    <div ref={wrapperRef} data-week-iso={iso} className={wrapperClass}>
       <WeekGrid
         label="Неделя"
         monday={monday}

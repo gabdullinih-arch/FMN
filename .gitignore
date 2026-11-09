@@ -2,6 +2,7 @@ node_modules/
 **/target/
 app/gen/
 app/frontend/bundle.js
+app/frontend/assets/
 
 *.log
 out_*.txt
