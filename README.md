@@ -50,7 +50,7 @@ Set-Location .\app
 cargo tauri build
 ```
 
-Before building, Tauri itself runs the frontend build; the bundle and its assets are created in `app/frontend/` and are not kept in Git. Release files are located in `app/target/release/`, and installers are in `app/target/release/bundle/`.
+Before building, Tauri itself runs the frontend build; the result is created in `app/frontend/bundle.js` and is not kept in Git. Release files are located in `app/target/release/`, and installers are in `app/target/release/bundle/`.
 
 ## Project structure
 

@@ -8,23 +8,11 @@ const dom = new JSDOM(`<!DOCTYPE html><html><body><div id="root"></div></body></
   runScripts: "outside-only", pretendToBeVisual: true, url: "http://localhost/",
 });
 const { window } = dom;
-const intersectionObservers = [];
-window.IntersectionObserver = class {
-  constructor(cb, options) { this.cb = cb; this.options = options; this.targets = new Set(); intersectionObservers.push(this); }
-  observe(target) { this.targets.add(target); }
-  unobserve(target) { this.targets.delete(target); }
-  disconnect() { this.targets.clear(); }
-  trigger(target, isIntersecting) {
-    if (this.targets.has(target)) this.cb([{ target, isIntersecting }]);
-  }
-};
+
+window.IntersectionObserver = class { constructor(cb){this.cb=cb;} observe(){} unobserve(){} disconnect(){} };
 window.Element.prototype.scrollIntoView = function () {};
 window.HTMLElement.prototype.getBoundingClientRect = function () { return {top:0,left:0,right:0,bottom:0,width:0,height:0}; };
 window.matchMedia = window.matchMedia || (() => ({ matches:false, addListener(){}, removeListener(){} }));
-const startupMonday = new Date();
-startupMonday.setHours(0, 0, 0, 0);
-startupMonday.setDate(startupMonday.getDate() - ((startupMonday.getDay() + 6) % 7));
-const startupMondayIso = `${startupMonday.getFullYear()}-${String(startupMonday.getMonth() + 1).padStart(2, "0")}-${String(startupMonday.getDate()).padStart(2, "0")}`;
 
 // ---- Мок Rust-бэкенда - переиспользует ту же (уже протестированную)
 // клиентскую логику clip/merge для set_interval, что и Planner.jsx сам
@@ -60,10 +48,6 @@ const futureWeekBefore = {
 };
 
 let invokeLog = [];
-let holdWeekDataIso = null;
-let releaseHeldWeekData = null;
-let releaseWeekLabels;
-let releaseInitialWeek;
 window.__TAURI_INTERNALS__ = {
   metadata: { currentWindow: { label: "main" } },
   invoke: async (cmd, args) => {
@@ -79,18 +63,9 @@ window.__TAURI_INTERNALS__ = {
         return week;
       }
       case "cmd_get_week_data": {
-        const getData = () => {
-          const days = [];
-          for (let d = 0; d < 7; d++) days.push(db.intervalsByDate[mondayPlusDays(args.monday, d)] || []);
-          return { days, cellMin: db.weekQuantums[args.monday] ?? null, ...(db.weekDayBounds[args.monday] || {}) };
-        };
-        if (args.monday === holdWeekDataIso && !releaseHeldWeekData) {
-          return new Promise((resolve) => { releaseHeldWeekData = () => resolve(getData()); });
-        }
-        if (args.monday === startupMondayIso && !releaseInitialWeek) {
-          return new Promise((resolve) => { releaseInitialWeek = () => resolve(getData()); });
-        }
-        return getData();
+        const days = [];
+        for (let d = 0; d < 7; d++) days.push(db.intervalsByDate[mondayPlusDays(args.monday, d)] || []);
+        return { days, cellMin: db.weekQuantums[args.monday] ?? null, ...(db.weekDayBounds[args.monday] || {}) };
       }
       case "cmd_get_day_intervals":
         return db.intervalsByDate[args.date] || [];
@@ -265,10 +240,7 @@ window.__TAURI_INTERNALS__ = {
         db.allDayEvents.push({ id: args.id, text: args.text, catId: args.catId, color: args.color, startDate: args.startDate, endDate: args.endDate });
         return null;
       case "cmd_clear_all_day": db.allDayEvents = db.allDayEvents.filter((e) => e.id !== args.id); return null;
-      case "cmd_get_week_labels":
-        return new Promise((resolve) => {
-          releaseWeekLabels = () => resolve(Object.entries(db.weekLabels));
-        });
+      case "cmd_get_week_labels": return Object.entries(db.weekLabels);
       case "cmd_tracker_stats_by_month": {
         const byCat = {};
         for (const [date, list] of Object.entries(db.intervalsByDate)) {
@@ -335,18 +307,6 @@ async function wait(ms){return new Promise(r=>setTimeout(r,ms));}
 async function settle(rounds, msEach) { for (let i=0;i<rounds;i++) await wait(msEach); }
 
 (async () => {
-  await settle(2, 20);
-  assert.ok(window.document.querySelector(".startup-loading"), "пока текущая неделя загружается, должен отображаться скелетон");
-  assert.ok(window.document.querySelector(".startup-flower-spin"), "в скелетоне должна вращаться иконка приложения");
-  assert.match(window.document.querySelector(".startup-flower-spin").getAttribute("src"), /assets\/app-icon-[\w-]+\.png$/, "загрузочная анимация должна использовать фактическую иконку приложения");
-  assert.equal(typeof releaseInitialWeek, "function", "тест удерживает критическую загрузку недели");
-  releaseInitialWeek();
-  await settle(8, 25);
-  assert.ok(window.document.querySelector(".week-card"), "текущая неделя должна отображаться, пока загружаются фоновые метаданные");
-  assert.equal(window.document.querySelectorAll(".week-card").length, 1, "при запуске должна монтироваться только текущая неделя");
-  assert.equal(window.document.querySelectorAll(".cell").length, 252, "при шаге 30 минут должны быть отрисованы только клетки одной недели");
-  assert.equal(typeof releaseWeekLabels, "function", "загрузка фоновых подписей недель должна начаться после показа календаря");
-  releaseWeekLabels();
   await settle(12, 200);
 
   console.log("=== вызовы invoke() при старте ===");
@@ -362,7 +322,6 @@ async function settle(rounds, msEach) { for (let i=0;i<rounds;i++) await wait(ms
     weekQuantumSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
     await settle(2, 60);
     assert.ok(Object.values(db.weekQuantums).includes(15), "индивидуальный квант недели должен сохраняться");
-    assert.equal(window.document.querySelectorAll(".cell").length, 504, "при шаге 15 минут должны отображаться клетки только одной недели");
     selectSetter.call(weekQuantumSelect, "");
     weekQuantumSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
     await settle(2, 60);
@@ -568,7 +527,7 @@ console.log("дней с 'Тренировка' в мок-БД:", nonEmptyDates.
 assert.equal(nonEmptyDates.length, 17, "одно правило должно создать 17 повторов по умолчанию");
 
 console.log("\n=== настройки: смена шага клетки -> уходит на бэкенд ===");
-const settingsBtn = [...window.document.querySelectorAll("button")].find(b => b.title && b.title.includes("Настройки"));
+const settingsBtn = [...window.document.querySelectorAll("button")].find(b => b.title && b.title.includes("Настройки сетки"));
 settingsBtn.click();
 await settle(2, 50);
 const cellMinSelect = [...window.document.querySelectorAll(".dock-settings-panel select")].find(s => [...s.options].some(o => o.value === "60") && [...s.options].some(o => o.value === "5"));
@@ -792,147 +751,6 @@ undoScriptButton.click();
 await settle(8, 100);
 assert.deepEqual(db.intervalsByDate[futureTargetDate], futureWeekBefore[futureTargetDate], "Undo должен восстановить существующую запись динамически загруженной недели");
 assert.deepEqual(db.intervalsByDate[futureOtherDate], futureWeekBefore[futureOtherDate], "Undo должен сохранить данные остальных дней недели");
-
-console.log("\n=== эксперимент: сетка 5 минут и очистка произвольного периода ===");
-settingsBtn.click();
-await settle(3, 80);
-const fiveMinuteSelect = [...window.document.querySelectorAll(".dock-settings-panel select")]
-  .find((select) => [...select.options].some((option) => option.value === "5"));
-assert.ok(fiveMinuteSelect, "в настройках должна быть доступна сетка с шагом 5 минут");
-nativeSelSetter.call(fiveMinuteSelect, "5");
-fiveMinuteSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
-await settle(6, 100);
-assert.equal(db.settings.cellMin, 5, "шаг 5 минут должен сохраниться в мок-бэкенде");
-assert.equal(window.document.querySelectorAll(".cell").length, 1512, "при шаге 5 минут должны отображаться 1512 клеток одной недели");
-
-const sampleInputs = [...window.document.querySelectorAll('[data-cell-input$="_main"]')].slice(0, 3);
-assert.equal(sampleInputs.length, 3, "в 5-минутной сетке должны быть доступны поля для примеров");
-const fiveMinuteSamples = ["5 минут: текстовая запись", "5 минут: задача", "5 минут: заметка"];
-sampleInputs.forEach((input, index) => {
-  nativeSetter.call(input, fiveMinuteSamples[index]);
-  input.dispatchEvent(new window.Event("input", { bubbles: true }));
-});
-await settle(8, 100);
-const visibleSampleValues = Object.values(db.intervalsByDate).flat().map((row) => row.text);
-fiveMinuteSamples.forEach((text) => assert.ok(visibleSampleValues.includes(text), `пример «${text}» должен сохраниться в мок-БД`));
-
-const clearMonday = new Date(startupMonday);
-clearMonday.setDate(clearMonday.getDate() + 2000);
-clearMonday.setDate(clearMonday.getDate() - ((clearMonday.getDay() + 6) % 7));
-const clearMondayIso = `${clearMonday.getFullYear()}-${String(clearMonday.getMonth() + 1).padStart(2, "0")}-${String(clearMonday.getDate()).padStart(2, "0")}`;
-const clearBeforeDate = mondayPlusDays(clearMondayIso, 0);
-const clearTargetDate = mondayPlusDays(clearMondayIso, 1);
-const clearAfterDate = mondayPlusDays(clearMondayIso, 2);
-const clearUntouchedDate = mondayPlusDays(clearMondayIso, 3);
-const clearSamples = {
-  [clearBeforeDate]: [{ startMin: 360, endMin: 365, text: "До выбранного периода", task: "Сохранить задачу", description: "разнообразные данные", color: "#2E7D74", catId: "c1", subId: null, done: true, moved: false }],
-  [clearTargetDate]: [{ startMin: 600, endMin: 605, text: "Удалить только этот день", task: "Целевая задача", description: "должна очиститься", color: "#3B5AA6", catId: "c2", subId: null, done: false, moved: false }],
-  [clearAfterDate]: [{ startMin: 900, endMin: 905, text: "После выбранного периода", task: "", description: "", color: "#2E7D74", catId: "c1", subId: null, done: false, moved: true }],
-  [clearUntouchedDate]: [{ startMin: 1200, endMin: 1205, text: "Не выбранный день", task: "", description: "", color: "", catId: null, subId: null, done: false, moved: false }],
-};
-Object.assign(db.intervalsByDate, structuredClone(clearSamples));
-
-const clearRailButton = [...window.document.querySelectorAll(".dock-rail-btn")].find((button) => button.title.includes("Инструмент очистки периода"));
-assert.ok(clearRailButton, "в правом рельсе должна быть кнопка инструмента очистки");
-assert.ok(clearRailButton.title.endsWith("(E)"), "подсказка при наведении должна показывать хоткей (E)");
-assert.equal(clearRailButton.querySelector(".keytip-badge"), null, "подсказка хоткея должна скрываться, пока Alt не нажат");
-window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Alt", code: "AltLeft", bubbles: true }));
-await settle(2, 50);
-assert.equal(clearRailButton.querySelector(".keytip-badge")?.textContent, "E", "при удержании Alt подсказка инструмента должна показывать одну клавишу E");
-window.dispatchEvent(new window.KeyboardEvent("keyup", { key: "Alt", code: "AltLeft", bubbles: true }));
-window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "E", code: "KeyE", bubbles: true }));
-await settle(2, 50);
-assert.ok(window.document.querySelector(".clear-range-panel"), "клавиша E должна открывать панель очистки");
-assert.ok(window.document.querySelector(".week-tiles-grid"), "режим очистки недели должен включать масштаб Week tiles");
-const selectableWeek = window.document.querySelector(".week-tile");
-const selectedWeekIso = selectableWeek.dataset.weekIso;
-selectableWeek.querySelector(".week-tile-main").click();
-await settle(2, 50);
-assert.ok(window.document.querySelector(".clear-range-panel .clear-range-summary").textContent.includes(selectedWeekIso), "выбранная плитка должна задать неделю для очистки");
-window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-await settle(2, 50);
-clearRailButton.click();
-await settle(2, 50);
-const clearPanel = window.document.querySelector(".clear-range-panel");
-assert.ok(clearPanel, "кнопка рельса должна открывать инструмент выбора периода");
-const clickClearMode = (mode) => [...clearPanel.querySelectorAll(".clear-range-mode-grid button")].find((button) => button.textContent.trim() === mode).click();
-clickClearMode("Месяц");
-await settle(2, 50);
-assert.ok(window.document.querySelector(".tiles-grid"), "режим очистки месяца должен переключать календарь на месячный масштаб");
-assert.equal(window.document.querySelector(".week-tiles-grid"), null, "месячный масштаб не должен оставаться в режиме Week tiles");
-const monthSelect = clearPanel.querySelector(".clear-range-period-fields select");
-nativeSelSetter.call(monthSelect, "1");
-monthSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
-const clearYearInput = clearPanel.querySelector('input[type="number"]');
-nativeSetter.call(clearYearInput, "2028");
-clearYearInput.dispatchEvent(new window.Event("input", { bubbles: true }));
-clearYearInput.dispatchEvent(new window.Event("change", { bubbles: true }));
-await settle(2, 40);
-assert.ok(clearPanel.querySelector(".clear-range-summary").textContent.includes("2028-02-01 — 2028-02-29"), "месячный период должен корректно учитывать високосный февраль");
-clickClearMode("Год");
-await settle(2, 40);
-assert.equal(window.document.querySelectorAll(".tiles-grid .view-tile").length >= 1, true, "режим очистки года должен переключать календарь на масштаб годов");
-assert.ok(clearPanel.querySelector(".clear-range-summary").textContent.includes("2028-01-01 — 2028-12-31"), "годовой период должен охватывать весь выбранный год");
-clickClearMode("Произвольный");
-await settle(2, 40);
-const dateInputs = clearPanel.querySelectorAll('input[type="date"]');
-nativeSetter.call(dateInputs[0], clearTargetDate);
-dateInputs[0].dispatchEvent(new window.Event("input", { bubbles: true }));
-dateInputs[0].dispatchEvent(new window.Event("change", { bubbles: true }));
-nativeSetter.call(dateInputs[1], clearTargetDate);
-dateInputs[1].dispatchEvent(new window.Event("input", { bubbles: true }));
-dateInputs[1].dispatchEvent(new window.Event("change", { bubbles: true }));
-assert.ok(clearPanel.querySelector(".clear-range-summary").textContent.includes(clearTargetDate), "произвольная дата должна появиться в предпросмотре перед очисткой");
-clearPanel.querySelector(".clear-range-add").click();
-await settle(2, 40);
-const multipleDateInputs = clearPanel.querySelectorAll('input[type="date"]');
-nativeSetter.call(multipleDateInputs[2], clearAfterDate);
-multipleDateInputs[2].dispatchEvent(new window.Event("input", { bubbles: true }));
-multipleDateInputs[2].dispatchEvent(new window.Event("change", { bubbles: true }));
-nativeSetter.call(multipleDateInputs[3], clearAfterDate);
-multipleDateInputs[3].dispatchEvent(new window.Event("input", { bubbles: true }));
-multipleDateInputs[3].dispatchEvent(new window.Event("change", { bubbles: true }));
-invokeLog = [];
-[...clearPanel.querySelectorAll("button")].find((button) => button.textContent.includes("Очистить выбранные периоды")).click();
-await settle(15, 100);
-assert.ok(invokeLog.includes("cmd_restore_weeks"), `очистка произвольных периодов должна одним batch-вызовом обновить недели; вызовы=${invokeLog}; ошибка=${clearPanel.querySelector('[role="alert"]')?.textContent}; toast=${window.document.querySelector(".toast")?.textContent}`);
-assert.equal(db.intervalsByDate[clearTargetDate], undefined, "выбранный день должен очиститься");
-assert.equal(db.intervalsByDate[clearAfterDate], undefined, "добавленный интервал также должен очиститься");
-assert.deepEqual(db.intervalsByDate[clearBeforeDate], clearSamples[clearBeforeDate], "данные до диапазона должны сохраниться");
-assert.deepEqual(db.intervalsByDate[clearUntouchedDate], clearSamples[clearUntouchedDate], "дни вне обоих интервалов должны сохраниться");
-const undoClearButton = [...window.document.querySelectorAll("button")].find((button) => button.title?.includes("Отменить последнее действие"));
-undoClearButton.click();
-await settle(10, 100);
-assert.deepEqual(db.intervalsByDate[clearTargetDate], clearSamples[clearTargetDate], "Undo должен восстановить очищенный день и его поля");
-assert.deepEqual(db.intervalsByDate[clearAfterDate], clearSamples[clearAfterDate], "Undo должен сохранить данные за концом диапазона");
-assert.deepEqual(db.intervalsByDate[clearUntouchedDate], clearSamples[clearUntouchedDate], "Undo должен сохранить незатронутые дни");
-
-console.log("\n=== быстрая прокрутка: скелетон и вращающаяся Незабудка для ещё не загруженной недели ===");
-clickClearMode("Произвольный");
-await settle(3, 60);
-const settingsRailButton = [...window.document.querySelectorAll(".dock-rail-btn")].find((button) => button.title.includes("Настройки"));
-const railButtons = [...window.document.querySelectorAll(".dock-rail-btn")];
-const clearRailButtonIndex = railButtons.findIndex((button) => button.title.includes("Инструмент очистки периода"));
-assert.equal(railButtons[clearRailButtonIndex + 1], settingsRailButton, "настройки должны идти сразу после инструмента очистки");
-const railChildren = [...settingsRailButton.parentElement.children];
-const peekIndex = railChildren.findIndex((element) => element.classList.contains("dock-rail-peek"));
-assert.ok(peekIndex > railChildren.indexOf(settingsRailButton), "декоративная стрелка должна находиться после настроек");
-const unmountedWeekWrapper = [...window.document.querySelectorAll(".week-lazy-wrapper")].find((element) => !element.querySelector(".week-card"));
-assert.ok(unmountedWeekWrapper, "в недельном режиме должны оставаться лениво загружаемые недели");
-holdWeekDataIso = unmountedWeekWrapper.dataset.weekIso;
-const mountObserver = intersectionObservers.find((observer) => observer.options?.rootMargin === "700px 0px" && observer.targets.has(unmountedWeekWrapper));
-assert.ok(mountObserver, "для недели должен быть активен observer ранней загрузки");
-mountObserver.trigger(unmountedWeekWrapper, true);
-await settle(2, 20);
-assert.ok(unmountedWeekWrapper.querySelector(".week-loading-card"), "при приближении к неделе должен сразу показываться скелетон вместо пустого места");
-await settle(3, 60);
-assert.ok(releaseHeldWeekData, "после небольшой задержки должна начаться загрузка данных недели");
-assert.ok(unmountedWeekWrapper.querySelector(".week-loading-flower"), "во время ожидания данных должна быть видна анимация иконки Незабудки");
-assert.ok(!unmountedWeekWrapper.querySelector(".week-card"), "тяжёлая сетка не должна монтироваться до загрузки данных");
-releaseHeldWeekData();
-for (let attempt = 0; attempt < 30 && !unmountedWeekWrapper.querySelector(".week-card"); attempt++) await wait(50);
-assert.ok(unmountedWeekWrapper.querySelector(".week-card"), "после получения данных скелетон должен смениться календарной неделей");
-holdWeekDataIso = null;
 
 console.log("=== необработанные ошибки за весь прогон ===");
 console.log(errors.length === 0 ? "ни одной" : errors);

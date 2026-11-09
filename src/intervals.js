@@ -22,16 +22,11 @@ export function isEmptyContent(v) {
 /* Находит интервал, покрывающий точку rowStart (начало текущей строки
    сетки) - dayIntervals отсортирован по startMin, гарантия бэкенда. */
 export function findIntervalAt(dayIntervals, rowStart) {
-  if (!dayIntervals || dayIntervals.length === 0) return null;
-  let low = 0;
-  let high = dayIntervals.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (dayIntervals[middle].startMin <= rowStart) low = middle + 1;
-    else high = middle;
+  if (!dayIntervals) return null;
+  for (const iv of dayIntervals) {
+    if (iv.startMin <= rowStart && iv.endMin > rowStart) return iv;
   }
-  const candidate = dayIntervals[low - 1];
-  return candidate && candidate.endMin > rowStart ? candidate : null;
+  return null;
 }
 
 /* Аналог старого readCellValue(cells, day, dayStart, rowIdx, cellMin) -

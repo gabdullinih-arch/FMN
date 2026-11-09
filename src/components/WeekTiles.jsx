@@ -12,7 +12,7 @@ import { useI18n, t } from "../i18n.js";
 /*  каким клеткам сетки.                                                */
 /* ------------------------------------------------------------------ */
 
-export function WeekTiles({ yearList, weekNumberLabels, markedWeeks, onToggleMark, onSetWeekNumber, onOpenWeek, selectionMode = false, selectedWeekIso = null, onSelectWeek }) {
+export function WeekTiles({ yearList, weekNumberLabels, markedWeeks, onToggleMark, onSetWeekNumber, onOpenWeek }) {
   const { language } = useI18n();
   const todayIso = toISO(getMonday(new Date()));
   return (
@@ -20,19 +20,11 @@ export function WeekTiles({ yearList, weekNumberLabels, markedWeeks, onToggleMar
       {yearList.map((monday) => {
         const iso = toISO(monday);
         const marked = markedWeeks.has(iso);
-        const selected = selectionMode && selectedWeekIso === iso;
         const isCurrent = iso === todayIso;
         return (
-          <div key={iso} data-week-iso={iso} className={`week-tile ${marked ? "week-tile-marked" : ""} ${selected ? "week-tile-selected" : ""} ${isCurrent ? "week-tile-current" : ""}`}>
-            <div
-              className="week-tile-main"
-              role="button"
-              tabIndex={0}
-              onClick={() => selectionMode ? onSelectWeek?.(iso) : onToggleMark(iso)}
-              onKeyDown={(e) => e.key === "Enter" && (selectionMode ? onSelectWeek?.(iso) : onToggleMark(iso))}
-              title={selectionMode ? t("Выбрать эту неделю для очистки", language) : t("Отметить/снять отметку для применения шаблона", language)}
-            >
-              {(marked || selected) && <span className="week-tile-check"><Check size={11} /></span>}
+          <div key={iso} className={`week-tile ${marked ? "week-tile-marked" : ""} ${isCurrent ? "week-tile-current" : ""}`}>
+            <div className="week-tile-main" role="button" tabIndex={0} onClick={() => onToggleMark(iso)} onKeyDown={(e) => e.key === "Enter" && onToggleMark(iso)} title="Отметить/снять отметку для применения шаблона">
+              {marked && <span className="week-tile-check"><Check size={11} /></span>}
               <input
                 className="week-tile-number-input"
                 value={weekNumberLabels[iso] || ""}
@@ -45,8 +37,8 @@ export function WeekTiles({ yearList, weekNumberLabels, markedWeeks, onToggleMar
               />
               <span className="week-tile-range">{t(formatRange(monday), language)}</span>
             </div>
-            <button className="week-tile-open" onClick={() => selectionMode ? onSelectWeek?.(iso) : onOpenWeek(iso)} title={selectionMode ? t("Выбрать эту неделю для очистки", language) : t("Открыть эту неделю целиком", language)}>
-              {selectionMode ? <Check size={12} /> : <ArrowUpRight size={12} />}
+            <button className="week-tile-open" onClick={() => onOpenWeek(iso)} title="Открыть эту неделю целиком">
+              <ArrowUpRight size={12} />
             </button>
           </div>
         );

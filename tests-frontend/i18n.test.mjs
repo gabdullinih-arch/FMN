@@ -7,19 +7,6 @@ assert.equal(t("Время начала", "en"), "Start time");
 assert.equal(t("Команды", "en"), "Actions");
 assert.equal(t("Месяц...", "en"), "Month...");
 assert.equal(t("Неделя", "en"), "Week");
-assert.equal(t("Очистка календаря", "en"), "Clear calendar");
-assert.equal(
-  t("Инструмент на правом рельсе (клавиша E): очищает записи в клетках выбранной недели, месяца, года или нескольких произвольных диапазонов дат. Для недели используется масштаб «Недели плитками»; перед очисткой показывается сводка. События на весь день и дела без времени не затрагиваются. Операцию можно отменить через Ctrl+Z.", "en"),
-  "Tool on the right rail (E): clears cell entries in the selected week, month, year, or multiple custom date ranges. Week mode uses the Week tiles scale; a summary is shown before clearing. All-day events and untimed tasks are not affected. Press Ctrl+Z to undo.",
-);
-assert.equal(t("Настройки", "en"), "Settings");
-assert.equal(t("Настройки (S)", "en"), "Settings (S)");
-assert.equal(t("Месяц", "en"), "Month");
-assert.equal(t("Произвольный интервал", "en"), "Custom date range");
-assert.equal(t("Очистить дни", "en"), "Clear days");
-assert.equal(t("Очистить календарный диапазон", "en"), "Clear calendar date range");
-assert.equal(t("Прокрутка по неделям - Q или клик, чтобы выключить", "en"), "Scroll by weeks — press Q or click to turn off");
-assert.equal(t("Автопрокрутка вверх - клик, чтобы остановить", "en"), "Auto-scroll up — click to stop");
 assert.equal(t("«Позвонить врачу» назначено на это время", "en"), "“Позвонить врачу” scheduled for this time");
 assert.equal(t("Не удалось назначить дело: database is locked", "en"), "Could not schedule task: database is locked");
 assert.equal(t("Шаблон «Мой шаблон» применён к неделе", "en"), "Template “Мой шаблон” applied to неделе");
