@@ -1,25 +1,139 @@
-import { memo, useState } from "react";
-import { Check, FileText, BookOpen } from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { Check, FileText, BookOpen, Plus } from "lucide-react";
+import { useI18n, t } from "../i18n.js";
 
 /* ------------------------------------------------------------------ */
 /*  Cell (мемоизирован: не перерисовывается, если его данные не менялись) */
 /* ------------------------------------------------------------------ */
 
 export const Cell = memo(function Cell({
-  iso, dayIdx, rowIdx, value, category, mode, selected, highlighted,
-  onCellDown, onCellEnter, onCellText, onCellTask, onCellSubPick, onCellDone, onCellDescription,
+  iso, dayIdx, rowIdx, value, category, mode, selected, highlighted, showDoneCheck,
+  categoryOptions = [], searchCategoryOptions = categoryOptions, onCellDown, onCellEnter, onCellText, onCellTask, onCellSubPick, onCellCategoryPick, onCreateCategoryForCell, onCellDone, onCellDescription,
   onHoverDescription, onLeaveDescription, onDropTodo, todoToScheduleId, onCancelTodoSchedule,
 }) {
+  const { language } = useI18n();
   const hasSubsToChoose = !!(category && category.subs && category.subs.length > 0);
   const showSplit = !!value.color;
   const needsSubPick = hasSubsToChoose && !value.subId;
-  const showCheck = !!value.catId;
+  const showCheck = showDoneCheck && !!value.catId;
   const sub = category && value.subId ? category.subs.find((s) => s.id === value.subId) : null;
   const effectiveDesc = value.description || (sub && sub.description) || "";
 
   const [descOpen, setDescOpen] = useState(false);
   const [subDescOpen, setSubDescOpen] = useState(false);
+  const [categoryPickerOpen, setCategoryPickerOpen] = useState(false);
+  const [activeCategoryIndex, setActiveCategoryIndex] = useState(-1);
   const stop = (e) => { e.stopPropagation(); };
+
+  const categoryQuery = (value.text || "").trim().toLocaleLowerCase();
+  const choosingSubcategory = !!(value.catId && needsSubPick);
+  const subcategoryOptions = choosingSubcategory
+    ? category.subs.map((subOption) => ({
+      key: `${category.id}-${subOption.id}`,
+      label: `${category.name} - ${subOption.name}`,
+      category,
+      sub: subOption,
+    }))
+    : [];
+  const availableCategoryOptions = choosingSubcategory
+    ? subcategoryOptions
+    : categoryQuery ? searchCategoryOptions : categoryOptions;
+  const filteredChoices = useMemo(() => {
+    const query = choosingSubcategory ? "" : categoryQuery.trim();
+    const items = query
+      ? availableCategoryOptions.filter((choice) => choice.label.toLocaleLowerCase().includes(query))
+      : availableCategoryOptions;
+    return items.slice(0, 8);
+  }, [availableCategoryOptions, categoryQuery, choosingSubcategory]);
+  const exactCategoryChoice = useMemo(() => {
+    const query = categoryQuery.trim();
+    if (!query) return null;
+    return availableCategoryOptions.find((choice) => choice.label.toLocaleLowerCase() === query) || null;
+  }, [availableCategoryOptions, categoryQuery]);
+  const visibleCategoryChoices = filteredChoices;
+  const pickerId = `cell-category-options-${iso}-${dayIdx}-${rowIdx}`;
+  const canCreateCategory = !choosingSubcategory && !!value.text?.trim() && !exactCategoryChoice;
+  const categoryOptionCount = visibleCategoryChoices.length + (canCreateCategory ? 1 : 0);
+
+  useEffect(() => {
+    if (!categoryPickerOpen) {
+      setActiveCategoryIndex(-1);
+    }
+  }, [categoryPickerOpen]);
+
+  function renderCategoryPicker() {
+    if (!categoryPickerOpen || mode !== "text") return null;
+    return (
+        <div className="cell-category-picker" id={pickerId} role="listbox" aria-label={t("Выберите категорию или создайте новую", language)} onPointerDown={(event) => event.stopPropagation()}>
+        {visibleCategoryChoices.map((choice, index) => (
+          <div key={choice.key} id={`${pickerId}-option-${index}`} role="option" aria-selected={activeCategoryIndex === index} className={`cell-category-option ${activeCategoryIndex === index ? "active" : ""}`} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={() => { onCellCategoryPick?.(iso, dayIdx, rowIdx, choice.category, choice.sub); setCategoryPickerOpen(false); }}>
+            <span className="cell-category-swatch" style={{ "--category-option-color": choice.category.color }} />
+            <span>{choice.label}</span>
+          </div>
+        ))}
+        {canCreateCategory && <div id={`${pickerId}-option-${visibleCategoryChoices.length}`} role="option" aria-selected={activeCategoryIndex === visibleCategoryChoices.length} className={`cell-category-create ${activeCategoryIndex === visibleCategoryChoices.length ? "active" : ""}`} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={() => { onCreateCategoryForCell?.(iso, dayIdx, rowIdx, value.text); setCategoryPickerOpen(false); }}>
+          <Plus size={13} /> {t("Создать категорию", language)} <strong>{value.text.trim()}</strong>
+        </div>}
+        {visibleCategoryChoices.length === 0 && !value.text?.trim() && <span className="cell-category-empty">{t(searchCategoryOptions.length ? "Добавьте категории в частые, нажав на звёздочку." : "Категорий пока нет", language)}</span>}
+      </div>
+    );
+  }
+
+  function renderCategoryInput(inputClassName) {
+    return (
+      <div className="cell-category-entry">
+        <input
+          value={value.text || ""}
+          onChange={(event) => { setActiveCategoryIndex(-1); onCellText(iso, dayIdx, rowIdx, event.target.value); }}
+          onFocus={() => { setActiveCategoryIndex(-1); setCategoryPickerOpen(true); }}
+          onBlur={(event) => { if (!event.currentTarget.parentElement.contains(event.relatedTarget)) setCategoryPickerOpen(false); }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && categoryPickerOpen) { event.preventDefault(); setCategoryPickerOpen(false); setActiveCategoryIndex(-1); return; }
+            if (event.key === "ArrowDown" && categoryPickerOpen) {
+              event.preventDefault();
+              if (categoryOptionCount) setActiveCategoryIndex((index) => (index + 1) % categoryOptionCount);
+              return;
+            }
+            if (event.key === "ArrowUp" && categoryPickerOpen) {
+              event.preventDefault();
+              if (categoryOptionCount) setActiveCategoryIndex((index) => (index <= 0 ? categoryOptionCount - 1 : index - 1));
+              return;
+            }
+            if (event.key === "Enter" && categoryPickerOpen && activeCategoryIndex >= 0 && activeCategoryIndex < visibleCategoryChoices.length) {
+              event.preventDefault();
+              const choice = visibleCategoryChoices[activeCategoryIndex];
+              onCellCategoryPick?.(iso, dayIdx, rowIdx, choice.category, choice.sub);
+              setCategoryPickerOpen(false);
+              return;
+            }
+            if (event.key === "Enter" && categoryPickerOpen && canCreateCategory && activeCategoryIndex === visibleCategoryChoices.length) {
+              event.preventDefault();
+              onCreateCategoryForCell?.(iso, dayIdx, rowIdx, value.text);
+              setCategoryPickerOpen(false);
+              return;
+            }
+            if (event.key === "Enter" && categoryPickerOpen && exactCategoryChoice) {
+              event.preventDefault();
+              onCellCategoryPick?.(iso, dayIdx, rowIdx, exactCategoryChoice.category, exactCategoryChoice.sub);
+              setCategoryPickerOpen(false);
+              return;
+            }
+            handleFieldKeyDown(event, "main");
+          }}
+          data-cell-input={`${iso}_${dayIdx}_${rowIdx}_main`}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={categoryPickerOpen}
+          aria-controls={pickerId}
+          aria-activedescendant={categoryPickerOpen && activeCategoryIndex >= 0 ? `${pickerId}-option-${activeCategoryIndex}` : undefined}
+          className={inputClassName}
+          aria-label={t("Дело или категория", language)}
+          style={{ pointerEvents: mode === "text" ? "auto" : "none" }}
+        />
+        {renderCategoryPicker()}
+      </div>
+    );
+  }
 
   function handleEnter(e) {
     onCellEnter(iso, dayIdx, rowIdx);
@@ -82,7 +196,7 @@ export const Cell = memo(function Cell({
             className={`cell-done-check ${value.done ? "done" : ""}`}
             onPointerDown={stop}
             onClick={(e) => { stop(e); onCellDone(iso, dayIdx, rowIdx, !value.done); }}
-            title={value.done ? "Отмечено как выполнено - нажмите, чтобы снять" : "Отметить как выполнено (для трекера)"}
+            title={value.done ? t("Всё дело отмечено выполненным — нажмите, чтобы снять отметку", language) : t("Отметить всё дело выполненным", language)}
           >
             {value.done ? <Check size={9} /> : null}
           </button>
@@ -131,26 +245,9 @@ export const Cell = memo(function Cell({
       {showSplit ? (
         <div className="cell-split">
           {needsSubPick ? (
-            <select
-              className="cell-subselect"
-              value=""
-              onChange={(e) => e.target.value && onCellSubPick(iso, dayIdx, rowIdx, category, e.target.value)}
-              title="Выбрать подкатегорию"
-              style={{ pointerEvents: mode === "text" ? "auto" : "none" }}
-            >
-              <option value="" disabled data-no-translate>{value.text || category.name}</option>
-              {category.subs.map((s) => <option key={s.id} value={s.id} data-no-translate>{s.name}</option>)}
-            </select>
+            renderCategoryInput("cell-subselect")
           ) : (
-            <input
-              list="planner-legend"
-              value={value.text}
-              onChange={(e) => onCellText(iso, dayIdx, rowIdx, e.target.value)}
-              onKeyDown={(e) => handleFieldKeyDown(e, "main")}
-              data-cell-input={`${iso}_${dayIdx}_${rowIdx}_main`}
-              className="cell-input cell-input-top"
-              style={{ pointerEvents: mode === "text" ? "auto" : "none" }}
-            />
+            renderCategoryInput("cell-input cell-input-top")
           )}
           <input
             value={value.task || ""}
@@ -163,15 +260,7 @@ export const Cell = memo(function Cell({
           />
         </div>
       ) : (
-        <input
-          list="planner-legend"
-          value={value.text}
-          onChange={(e) => onCellText(iso, dayIdx, rowIdx, e.target.value)}
-          onKeyDown={(e) => handleFieldKeyDown(e, "main")}
-          data-cell-input={`${iso}_${dayIdx}_${rowIdx}_main`}
-          className="cell-input"
-          style={{ pointerEvents: mode === "text" ? "auto" : "none" }}
-        />
+        renderCategoryInput("cell-input")
       )}
     </div>
   );

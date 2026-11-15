@@ -6,7 +6,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub mod backup;
 
@@ -18,6 +18,8 @@ pub const SCHEMA_SQL_005: &str = include_str!("../migrations/005_watchers.sql");
 pub const SCHEMA_SQL_006: &str = include_str!("../migrations/006_week_quantum.sql");
 pub const SCHEMA_SQL_007: &str = include_str!("../migrations/007_recurring_conflict_mode.sql");
 pub const SCHEMA_SQL_008: &str = include_str!("../migrations/008_week_day_bounds.sql");
+pub const SCHEMA_SQL_009: &str = include_str!("../migrations/009_week_custom_times.sql");
+pub const SCHEMA_SQL_010: &str = include_str!("../migrations/010_minute_precision.sql");
 
 fn init_schema_if_needed(conn: &Connection) -> rusqlite::Result<()> {
     let mut version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -98,6 +100,20 @@ fn init_schema_if_needed(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch(SCHEMA_SQL_008)?;
         }
         conn.pragma_update(None, "user_version", 8)?;
+        version = 8;
+    }
+
+    if version < 9 {
+        if !table_exists(conn, "week_custom_times")? {
+            conn.execute_batch(SCHEMA_SQL_009)?;
+        }
+        conn.pragma_update(None, "user_version", 9)?;
+        version = 9;
+    }
+
+    if version < 10 {
+        conn.execute_batch(SCHEMA_SQL_010)?;
+        conn.pragma_update(None, "user_version", 10)?;
     }
 
     conn.execute(
@@ -161,7 +177,7 @@ mod schema_initialization_tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, 8);
+        assert_eq!(version, 10);
         assert_eq!(category_count, 1);
         assert!(has_reflections);
         assert!(has_created_years);
@@ -170,6 +186,7 @@ mod schema_initialization_tests {
         assert!(table_exists(&conn, "planscript_watchers")?);
         assert!(table_exists(&conn, "week_quantum")?);
         assert!(table_exists(&conn, "week_day_bounds")?);
+        assert!(table_exists(&conn, "week_custom_times")?);
         Ok(())
     }
 
@@ -382,8 +399,7 @@ pub fn set_interval_tx(
     end_min: i64,
     patch: &IntervalPatch,
 ) -> rusqlite::Result<()> {
-    assert!(start_min < end_min, "start_min должен быть меньше end_min");
-    assert!(start_min % 5 == 0 && end_min % 5 == 0, "границы должны быть кратны 5 минутам");
+    assert!(start_min >= 0 && start_min < end_min && end_min <= 1440, "границы должны быть внутри суток и start_min должен быть меньше end_min");
 
     // 1) Найти существующее содержимое РОВНО в точке start_min (для мерджа
     //    полей patch поверх него - как readCellValue() в старой модели),
@@ -974,6 +990,81 @@ pub fn set_week_quantum(conn: &Connection, monday: &str, cell_min: Option<i64>) 
         }
     }
     Ok(())
+}
+
+pub fn get_week_custom_times(conn: &Connection, monday: &str) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT time_min FROM week_custom_times WHERE monday_date=?1 ORDER BY time_min")?;
+    let rows = stmt.query_map([monday], |row| row.get(0))?;
+    rows.collect()
+}
+
+pub fn set_week_custom_times(conn: &Connection, monday: &str, times: &[i64]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM week_custom_times WHERE monday_date=?1", [monday])?;
+    for minute in times {
+        if !(0..1440).contains(minute) {
+            return Err(rusqlite::Error::InvalidParameterName(format!("Invalid custom time: {minute}")));
+        }
+        tx.execute("INSERT INTO week_custom_times (monday_date, time_min) VALUES (?1, ?2)", params![monday, minute])?;
+    }
+    tx.commit()
+}
+
+pub fn preserve_global_quantum_conflicts(
+    conn: &Connection,
+    default_day_start: i64,
+    quantum: i64,
+) -> rusqlite::Result<Vec<(String, Vec<i64>)>> {
+    if quantum <= 0 { return Ok(Vec::new()); }
+    let mut existing: HashMap<String, HashSet<i64>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT monday_date, time_min FROM week_custom_times")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (monday, minute) = row?;
+            existing.entry(monday).or_default().insert(minute);
+        }
+    }
+    let mut occupied: HashMap<(String, String, i64), String> = HashMap::new();
+    let mut added: HashMap<String, HashSet<i64>> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT i.date, i.start_min, i.end_min, i.text, i.task, i.color, i.cat_id, i.sub_id,
+                COALESCE(b.day_start, ?1),
+                date(i.date, printf('-%d days', (CAST(strftime('%w', i.date) AS INTEGER) + 6) % 7))
+         FROM intervals i
+         LEFT JOIN week_day_bounds b ON b.monday_date = date(i.date, printf('-%d days', (CAST(strftime('%w', i.date) AS INTEGER) + 6) % 7))
+         LEFT JOIN week_quantum q ON q.monday_date = date(i.date, printf('-%d days', (CAST(strftime('%w', i.date) AS INTEGER) + 6) % 7))
+         WHERE q.monday_date IS NULL AND (i.color <> '' OR i.text <> '' OR i.task <> '')
+         ORDER BY i.date, i.start_min",
+    )?;
+    let rows = stmt.query_map([default_day_start], |row| Ok((
+        row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
+        row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
+        row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?,
+        row.get::<_, i64>(8)?, row.get::<_, String>(9)?,
+    )))?;
+    for row in rows {
+        let (date, start, end, text, task, color, cat, sub, day_start, monday) = row?;
+        let signature = format!("{text}\u{1f}{task}\u{1f}{color}\u{1f}{cat:?}\u{1f}{sub:?}");
+        let first = (start - day_start).div_euclid(quantum);
+        let last = (end - 1 - day_start).div_euclid(quantum);
+        for cell in first..=last {
+            let key = (monday.clone(), date.clone(), cell);
+            if let Some(previous) = occupied.get(&key) {
+                if previous != &signature && !existing.get(&monday).is_some_and(|times| times.contains(&start)) {
+                    added.entry(monday.clone()).or_default().insert(start);
+                }
+            }
+            occupied.insert(key, signature.clone());
+        }
+    }
+    Ok(added.into_iter().map(|(monday, times)| {
+        let mut all = existing.remove(&monday).unwrap_or_default();
+        all.extend(times);
+        let mut sorted: Vec<i64> = all.into_iter().collect();
+        sorted.sort_unstable();
+        (monday, sorted)
+    }).collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

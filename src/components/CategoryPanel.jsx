@@ -1,9 +1,11 @@
-import { useState, useEffect } from "react";
-import { X, Plus, FileText } from "lucide-react";
+import { useState, useEffect, useMemo } from "react";
+import { X, Plus, FileText, Star } from "lucide-react";
 import { DEFAULT_COLORS } from "../constants.js";
 import { uid } from "../utils.js";
+import { useI18n, t } from "../i18n.js";
 
-export function CategoryPanel({ categories, setCategories, active, setActive, onPickCategory }) {
+export function CategoryPanel({ categories, setCategories, active, setActive, onPickCategory, favoriteCategoryIds = [], onToggleFavoriteCategory }) {
+  const { language } = useI18n();
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState(DEFAULT_COLORS[0]);
   const [subInput, setSubInput] = useState("");
@@ -13,7 +15,8 @@ export function CategoryPanel({ categories, setCategories, active, setActive, on
     setNewColor(DEFAULT_COLORS[categories.length % DEFAULT_COLORS.length]);
   }, [categories.length]);
 
-
+  const favoriteSet = useMemo(() => new Set(favoriteCategoryIds), [favoriteCategoryIds]);
+  const favoriteCategories = useMemo(() => categories.filter((cat) => favoriteSet.has(cat.id)), [categories, favoriteSet]);
 
   function addCategory() {
     if (!newName.trim()) return;
@@ -65,6 +68,25 @@ export function CategoryPanel({ categories, setCategories, active, setActive, on
         {active && <span className="category-toggle-active">&middot; активна: <span data-no-translate>{active.label}</span></span>}
       </div>
       <div className="category-body">
+        {favoriteCategories.length > 0 && (
+          <div className="favorite-category-block">
+            <div className="subpick-title">{t("Часто используемые", language)}</div>
+            <div className="favorite-category-list">
+              {favoriteCategories.map((cat) => (
+                <button
+                  key={`favorite-${cat.id}`}
+                  type="button"
+                  className={`chip chip-favorite ${active?.catId === cat.id ? "chip-active" : ""}`}
+                  style={{ "--chip-color": cat.color }}
+                  onClick={() => pickCategory(cat)}
+                  title={`${t("Выбрать категорию", language)} «${cat.name}»`}
+                >
+                  <span data-no-translate>{cat.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {categories.length === 0 && <div className="hint-text">Категорий пока нет - добавьте первую ниже.</div>}
         {categories.map((cat) => {
             const isActiveCat = active?.catId === cat.id;
@@ -80,7 +102,16 @@ export function CategoryPanel({ categories, setCategories, active, setActive, on
                   >
                     <span data-no-translate>{cat.name}{cat.subs.length > 0 ? ` (${cat.subs.length})` : ""}</span>
                   </button>
-                  <button onClick={() => removeCat(cat.id, cat.name)} title="Удалить категорию" aria-label="Удалить категорию" className="icon-btn subtle icon-action-button ml-auto"><X size={16} /></button>
+                  <button
+                    type="button"
+                    onClick={() => onToggleFavoriteCategory?.(cat.id)}
+                    title={favoriteSet.has(cat.id) ? t("Убрать из частых категорий", language) : t("Добавить в частые категории", language)}
+                    className={`icon-btn subtle icon-action-button ${favoriteSet.has(cat.id) ? "is-favorite" : ""}`}
+                    aria-label={favoriteSet.has(cat.id) ? t("Убрать из частых категорий", language) : t("Добавить в частые категории", language)}
+                  >
+                    <Star size={14} fill={favoriteSet.has(cat.id) ? "currentColor" : "none"} />
+                  </button>
+                  <button onClick={() => removeCat(cat.id, cat.name)} title="Удалить категорию" aria-label="Удалить категорию" className="icon-btn subtle icon-action-button"><X size={16} /></button>
                 </div>
 
                 {/* Подкатегории - сразу под своей категорией, а не в общем хвосте списка */}

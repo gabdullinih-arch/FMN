@@ -15,9 +15,9 @@ import {
 } from "./utils.js";
 import {
   fetchWeekIntervals, fetchDayIntervals, writeInterval, clearIntervalRange, restoreWeek, restoreWeeks,
-  fetchSettings, updateSettingsRemote, fetchWeekData, saveWeekQuantum, saveWeekDayBounds, listCategories, listSubcategories,
+  fetchSettings, updateSettingsRemote, fetchWeekData, saveWeekQuantum, saveWeekDayBounds, saveWeekCustomTimes, preserveGlobalQuantumConflicts, listCategories, listSubcategories,
   listTemplates, listRecurringRules, listTodos, listAllAllDayEvents,
-  getWeekLabels, setWeekLabel, listCreatedYears, addCreatedYear,
+  getWeekLabels, setWeekLabel, listCreatedYears, addCreatedYear, deleteCreatedYear,
   getReflection, setReflection, exportReflectionsMarkdown, saveTextFile,
   exportDatabaseBackup, importDatabaseBackup, saveJsonFile, exportAllReflectionsMarkdown,
   addCategory, renameCategory, updateCategoryColor, deleteCategory,
@@ -35,7 +35,7 @@ import {
   saveWatchResult, listWatchIndicators, listAffectedWatchInstances,
 } from "./storage.js";
 import {
-  EMPTY_CELL, readCellValue, applyPatchLocally, clearRangeLocally, buildAgendaEventsFromIntervals,
+  EMPTY_CELL, readCellValue, applyPatchLocally, clearRangeLocally, buildAgendaEventsFromIntervals, getQuantumConflictBoundaries, findNextBrushHeaderCell,
   daysToTemplateIntervals, dayToTemplateIntervals,
 } from "./intervals.js";
 import { GlobalStyles } from "./styles.jsx";
@@ -109,6 +109,17 @@ function PlannerContent() {
   const [dockHover, setDockHover] = useState(false);
   const [manualColor, setManualColor] = useState(DEFAULT_COLORS[0]);
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+  const [favoriteCategoryIds, setFavoriteCategoryIds] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem("fmn-favorite-categories");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+    } catch (error) {
+      console.warn("Could not load favorite categories", error);
+      return [];
+    }
+  });
   const categoriesLoadedRef = useRef(false);
   const [active, setActive] = useState(null);
   const [eyedropperActive, setEyedropperActive] = useState(false); // пипетка (I) - следующий клик по клетке возьмёт её "краску"
@@ -146,10 +157,11 @@ function PlannerContent() {
   const [createdYears, setCreatedYears] = useState([REAL_YEAR]);
   const [createYearModalOpen, setCreateYearModalOpen] = useState(false);
   const [createYearInput, setCreateYearInput] = useState("");
-  const [clearRangeScope, setClearRangeScope] = useState("week");
-  const [clearRangeAnchor, setClearRangeAnchor] = useState("");
-  const [clearRangeMonth, setClearRangeMonth] = useState(new Date().getMonth());
+  const [clearRangeScope, setClearRangeScope] = useState("custom");
+  const [clearRangeWeeks, setClearRangeWeeks] = useState([]);
+  const [clearRangeMonths, setClearRangeMonths] = useState([new Date().getMonth()]);
   const [clearRangeYear, setClearRangeYear] = useState(REAL_YEAR);
+  const [clearRangeYears, setClearRangeYears] = useState([REAL_YEAR]);
   const [clearRangeStart, setClearRangeStart] = useState("");
   const [clearRangeEnd, setClearRangeEnd] = useState("");
   const [clearRangeAdditional, setClearRangeAdditional] = useState([]);
@@ -159,6 +171,7 @@ function PlannerContent() {
   const [highlight, setHighlight] = useState(null);
   const [dayHighlight, setDayHighlight] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [settingsLoading, setSettingsLoading] = useState(false);
   const [startupError, setStartupError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState(null);
@@ -257,9 +270,26 @@ function PlannerContent() {
   const weekCellMin = useCallback((iso) => weeksDataRef.current[iso]?.cellMin ?? settingsRef.current.cellMin, []);
   const weekDayStart = useCallback((iso) => weeksDataRef.current[iso]?.dayStart ?? settingsRef.current.dayStart, []);
   const weekDayEnd = useCallback((iso) => weeksDataRef.current[iso]?.dayEnd ?? settingsRef.current.dayEnd, []);
-  const rowCountForWeek = useCallback((iso) => {
-    return Math.ceil((weekDayEnd(iso) - weekDayStart(iso)) / weekCellMin(iso));
+  const weekRowStarts = useCallback((iso) => {
+    const start = weekDayStart(iso), end = weekDayEnd(iso), step = weekCellMin(iso);
+    const starts = [];
+    for (let minute = start; minute < end; minute += step) starts.push(minute);
+    for (const minute of weeksDataRef.current[iso]?.customTimes || []) {
+      if (minute > start && minute < end && !starts.includes(minute)) starts.push(minute);
+    }
+    return starts.sort((a, b) => a - b);
   }, [weekCellMin, weekDayStart, weekDayEnd]);
+  const weekRowStart = useCallback((iso, index) => weekRowStarts(iso)[index] ?? weekDayEnd(iso), [weekRowStarts, weekDayEnd]);
+  const weekRowEnd = useCallback((iso, index) => weekRowStarts(iso)[index + 1] ?? weekDayEnd(iso), [weekRowStarts, weekDayEnd]);
+  const weekRowAtTime = useCallback((iso, minute) => {
+    const starts = weekRowStarts(iso);
+    let index = 0;
+    for (let i = 1; i < starts.length && starts[i] <= minute; i++) index = i;
+    return index;
+  }, [weekRowStarts]);
+  const rowCountForWeek = useCallback((iso) => {
+    return weekRowStarts(iso).length;
+  }, [weekRowStarts]);
 
   useEffect(() => { selRef.current = selection; }, [selection]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
@@ -279,6 +309,13 @@ function PlannerContent() {
   const showToastRef = useRef(showToast);
   showToastRef.current = showToast;
 
+  useEffect(() => {
+    if (loading) return undefined;
+    setSettingsLoading(true);
+    const timer = setTimeout(() => setSettingsLoading(false), 350);
+    return () => clearTimeout(timer);
+  }, [language]);
+
   const updateWeeksData = useCallback((updater) => {
     const next = typeof updater === "function" ? updater(weeksDataRef.current) : updater;
     weeksDataRef.current = next;
@@ -295,7 +332,7 @@ function PlannerContent() {
     const pending = weekLoadPromisesRef.current.get(iso);
     if (pending) return pending;
     const load = fetchWeekData(iso).then((week) => {
-      const data = { days: week.days, cellMin: week.cellMin, dayStart: week.dayStart, dayEnd: week.dayEnd };
+      const data = { days: week.days, cellMin: week.cellMin, dayStart: week.dayStart, dayEnd: week.dayEnd, customTimes: week.customTimes || [] };
       updateWeeksData((prev) => ({ ...prev, [iso]: data }));
       return data;
     }).finally(() => {
@@ -322,14 +359,16 @@ function PlannerContent() {
   // такое совпадение маловероятно (неделя уже далеко за экраном), но
   // на всякий случай подстраховываемся, чтобы не оборвать жест на полпути.
   const handleWeekVisible = useCallback((iso, isStillNear) => {
-    // Монтирование новой недели при скролле - при мелком шаге клетки
-    // (10/5 мин) это сотни компонентов на одну неделю; при быстром
-    // скролле такие монтирования идут одно за другим почти без пауз.
-    // startTransition даёт скроллу/следующим кадрам приоритет выше,
-    // чем этой довольно тяжёлой, но не срочной подгрузке контента.
+    // Есть два важных требования: (1) после загрузки данных неделя должна
+    // действительно монтироваться, даже если вызов идёт через замок
+    // IntersectionObserver / async-promise и (2) при быстром скролле не
+    // должно зависать на скелетоне бесконечно. Для этого обновление флага
+    // монтирования делаем синхронно после фактической загрузки данных, без
+    // откладывания в startTransition: в тестовом окружении и при реальном
+    // скролле это обеспечивает предсказуемый переход из skeleton -> week-card.
     ensureLoadedData(iso).then(() => {
       if (!isStillNear()) return;
-      startTransition(() => { setMountedWeeks((p) => ({ ...p, [iso]: true })); });
+      setMountedWeeks((prev) => (prev[iso] ? prev : { ...prev, [iso]: true }));
     }).catch((error) => {
       console.error(`Could not load week ${iso}`, error);
       showToast(`Не удалось загрузить неделю: ${error instanceof Error ? error.message : String(error)}`);
@@ -427,6 +466,18 @@ function PlannerContent() {
     });
     return () => { active = false; };
   }, [ensureLoadedData, isoCur]);
+
+  const toggleFavoriteCategory = useCallback((catId) => {
+    setFavoriteCategoryIds((prev) => {
+      const next = prev.includes(catId) ? prev.filter((id) => id !== catId) : [...prev, catId];
+      try {
+        window.localStorage.setItem("fmn-favorite-categories", JSON.stringify(next));
+      } catch (error) {
+        console.warn("Could not save favorite categories", error);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (activeDockPanel !== "script" || scriptsLoadedRef.current) return;
@@ -591,6 +642,34 @@ function PlannerContent() {
       }
       return;
     }
+    if (last.kind === "customTimeRow") {
+      try {
+        await restoreWeek(last.iso, last.days);
+        try {
+          await saveWeekCustomTimes(last.iso, last.customTimes);
+        } catch (error) {
+          const rollbackErrors = [];
+          try { await restoreWeek(last.iso, last.nextDays); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+          try { await saveWeekCustomTimes(last.iso, last.nextCustomTimes); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+          if (rollbackErrors.length) {
+            console.error("Could not roll back failed custom row undo", rollbackErrors);
+            throw new Error(`${error instanceof Error ? error.message : String(error)}; ${t("не удалось восстановить исходное состояние")}`);
+          }
+          throw error;
+        }
+        updateWeeksData((prev) => ({
+          ...prev,
+          [last.iso]: { ...prev[last.iso], days: last.days, customTimes: last.customTimes },
+        }));
+        maybeRefreshTracker();
+        showToast(t("Удаление строки отменено"));
+      } catch (error) {
+        historyRef.current.push(last);
+        setHistoryCount(historyRef.current.length);
+        showToast(`${t("Не удалось отменить действие:")} ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
     if (last.kind === "planscript") {
       try {
         await applyPlanScriptOperations(last.inverseOperations);
@@ -679,20 +758,19 @@ function PlannerContent() {
   }, [writePendingInterval, showToast]);
 
   const setCellPatch = useCallback((iso, d, r, patch) => {
-    const cellMin = weekCellMin(iso);
-    const startMin = weekDayStart(iso) + r * cellMin;
-    const endMin = Math.min(weekDayEnd(iso), startMin + cellMin);
+    const startMin = weekRowStart(iso, r);
+    const endMin = weekRowEnd(iso, r);
     applyLocalCellPatch(iso, d, startMin, endMin, patch);
     scheduleCellWrite(iso, d, startMin, endMin, patch);
-  }, [applyLocalCellPatch, scheduleCellWrite, weekCellMin, weekDayStart, weekDayEnd]);
+  }, [applyLocalCellPatch, scheduleCellWrite, weekRowStart, weekRowEnd]);
 
   // Полная очистка клетки (ластик, повторный клик той же краской) -
   // аналог ClearInterval (не SetInterval с пустым патчем): без лишнего
   // похода "прочитать существующее на старте диапазона" на Rust-стороне.
   const clearCellPatch = useCallback((iso, d, r) => {
-    const cellMin = weekCellMin(iso);
-    const startMin = weekDayStart(iso) + r * cellMin;
-    const endMin = Math.min(weekDayEnd(iso), startMin + cellMin);
+    const startMin = weekRowStart(iso, r);
+    const endMin = weekRowEnd(iso, r);
+    const carryHeader = findNextBrushHeaderCell(weeksDataRef.current[iso]?.days?.[d] || [], startMin, endMin);
     const date = toISO(addDays(new Date(iso + "T00:00:00"), d));
     updateWeeksData((prev) => {
       const wk = prev[iso] || { days: [[], [], [], [], [], [], []] };
@@ -710,7 +788,8 @@ function PlannerContent() {
       catch (error) { showToast(`Не удалось очистить клетку: ${error instanceof Error ? error.message : String(error)}`); }
     }, 400);
     intervalWriteTimersRef.current[key] = pending;
-  }, [updateWeeksData, weekCellMin, weekDayStart, weekDayEnd, writePendingInterval, showToast]);
+    if (carryHeader) setCellPatch(iso, d, r + 1, { text: carryHeader.text });
+  }, [updateWeeksData, weekRowStart, weekRowEnd, writePendingInterval, showToast, setCellPatch]);
 
   const flushPendingWeekWrites = useCallback(async (iso) => {
     const pendingWrites = Object.entries(intervalWriteTimersRef.current)
@@ -747,19 +826,72 @@ function PlannerContent() {
     showToast("Неделя очищена");
   }, [updateWeeksData, showToast, maybeRefreshTracker, flushPendingWeekWrites]);
 
-  const openClearRangeDialog = useCallback((scope = "week") => {
+  const deleteWeekCustomTime = useCallback(async (iso, startMin) => {
+    if (!Number.isFinite(startMin) || !window.confirm(t("Удалить строку времени и все записи в ней? Действие можно отменить через Undo."))) return;
+    try {
+      await flushPendingWeekWrites(iso);
+    } catch (error) {
+      showToast(`${t("Не удалось сохранить ожидающие изменения:")} ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const previousCustomTimes = (weeksDataRef.current[iso]?.customTimes || []).slice();
+    if (!previousCustomTimes.includes(startMin)) return;
+    const rowIndex = weekRowStarts(iso).indexOf(startMin);
+    if (rowIndex < 0) {
+      showToast(t("Не удалось найти строку времени."));
+      return;
+    }
+    const endMin = weekRowEnd(iso, rowIndex);
+    const previousDays = (weeksDataRef.current[iso]?.days || [[], [], [], [], [], [], []]).map((intervals) => intervals.slice());
+    const nextDays = previousDays.map((intervals) => clearRangeLocally(intervals, startMin, endMin));
+    const hasChanges = previousDays.some((intervals, dayIdx) => JSON.stringify(intervals) !== JSON.stringify(nextDays[dayIdx]));
+    const nextCustomTimes = previousCustomTimes.filter((minute) => minute !== startMin);
+    try {
+      if (hasChanges) await restoreWeek(iso, nextDays);
+      try {
+        await saveWeekCustomTimes(iso, nextCustomTimes);
+      } catch (error) {
+        const rollbackErrors = [];
+        if (hasChanges) {
+          try { await restoreWeek(iso, previousDays); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+        }
+        try { await saveWeekCustomTimes(iso, previousCustomTimes); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+        if (rollbackErrors.length) {
+          console.error("Could not roll back failed custom row deletion", rollbackErrors);
+          throw new Error(`${error instanceof Error ? error.message : String(error)}; ${t("не удалось восстановить исходное состояние")}`);
+        }
+        throw error;
+      }
+    } catch (error) {
+      showToast(`${t("Не удалось удалить строку времени:")} ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    historyRef.current.push({ kind: "customTimeRow", iso, days: previousDays, customTimes: previousCustomTimes, nextDays, nextCustomTimes });
+    if (historyRef.current.length > 40) historyRef.current.shift();
+    setHistoryCount(historyRef.current.length);
+    updateWeeksData((prev) => ({ ...prev, [iso]: { ...prev[iso], days: nextDays, customTimes: nextCustomTimes } }));
+    maybeRefreshTracker();
+    showToast(t("Строка времени удалена"));
+  }, [flushPendingWeekWrites, maybeRefreshTracker, showToast, updateWeeksData, weekRowEnd, weekRowStarts]);
+
+  const openClearRangeDialog = useCallback((scope = "custom") => {
     const anchor = hoveredWeekIsoRef.current || isoCur;
     const monday = new Date(`${anchor}T00:00:00`);
-    setClearRangeAnchor(anchor);
-    setClearRangeMonth(monday.getMonth());
+    setClearRangeWeeks([anchor]);
+    setClearRangeMonths([monday.getMonth()]);
     setClearRangeYear(monday.getFullYear());
+    setClearRangeYears([monday.getFullYear()]);
     setClearRangeStart(anchor);
     setClearRangeEnd(toISO(addDays(monday, 6)));
     setClearRangeAdditional([]);
     setClearRangeScope(scope);
     setClearRangeError("");
     setViewMode(scope === "week" ? "weekTiles" : scope === "month" ? "months" : scope === "year" ? "years" : "weeks");
-    if (scope === "month") setYear(monday.getFullYear());
+    if (scope === "week") {
+      const firstWeek = weeksOfYear(year)[0];
+      setClearRangeWeeks((weeks) => weeks.length ? weeks : [toISO(firstWeek || getMonday(new Date()))]);
+    }
+    if (scope === "month" || scope === "week") setYear(monday.getFullYear());
     setActiveDockPanel("clearRange");
   }, [isoCur]);
 
@@ -768,29 +900,33 @@ function PlannerContent() {
     setClearRangeError("");
     setViewMode(scope === "week" ? "weekTiles" : scope === "month" ? "months" : scope === "year" ? "years" : "weeks");
     if (scope === "month") setYear(clearRangeYear);
-  }, [clearRangeYear]);
+    if (scope === "month") setClearRangeMonths((months) => months.length ? months : [new Date().getMonth()]);
+    if (scope === "year") setClearRangeYears((years) => years.length ? years : [clearRangeYear || REAL_YEAR]);
+  }, [clearRangeYear, year]);
 
   const clearRangeDates = useMemo(() => {
-    if (clearRangeScope === "week" && clearRangeAnchor) {
-      const monday = new Date(`${clearRangeAnchor}T00:00:00`);
-      return [{ start: clearRangeAnchor, end: toISO(addDays(monday, 6)) }];
+    if (clearRangeScope === "week") {
+      return [...new Set(clearRangeWeeks)].sort().map((weekStart) => {
+        const monday = new Date(`${weekStart}T00:00:00`);
+        return { start: weekStart, end: toISO(addDays(monday, 6)) };
+      });
     }
     if (clearRangeScope === "month") {
       const leapYear = clearRangeYear % 4 === 0 && (clearRangeYear % 100 !== 0 || clearRangeYear % 400 === 0);
       const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-      return [{
-        start: `${String(clearRangeYear).padStart(4, "0")}-${pad(clearRangeMonth + 1)}-01`,
-        end: `${String(clearRangeYear).padStart(4, "0")}-${pad(clearRangeMonth + 1)}-${pad(monthDays[clearRangeMonth])}`,
-      }];
+      return [...new Set(clearRangeMonths)].sort((left, right) => left - right).map((month) => ({
+        start: `${String(clearRangeYear).padStart(4, "0")}-${pad(month + 1)}-01`,
+        end: `${String(clearRangeYear).padStart(4, "0")}-${pad(month + 1)}-${pad(monthDays[month])}`,
+      }));
     }
     if (clearRangeScope === "year") {
-      return [{
-        start: `${String(clearRangeYear).padStart(4, "0")}-01-01`,
-        end: `${String(clearRangeYear).padStart(4, "0")}-12-31`,
-      }];
+      return [...new Set(clearRangeYears)].sort((left, right) => left - right).map((selectedYear) => ({
+        start: `${String(selectedYear).padStart(4, "0")}-01-01`,
+        end: `${String(selectedYear).padStart(4, "0")}-12-31`,
+      }));
     }
     return [{ start: clearRangeStart, end: clearRangeEnd }, ...clearRangeAdditional];
-  }, [clearRangeAdditional, clearRangeAnchor, clearRangeEnd, clearRangeMonth, clearRangeScope, clearRangeStart, clearRangeYear]);
+  }, [clearRangeAdditional, clearRangeEnd, clearRangeMonths, clearRangeScope, clearRangeStart, clearRangeWeeks, clearRangeYear, clearRangeYears]);
 
   const clearCalendarRange = useCallback(async () => {
     const validIsoDate = (value) => {
@@ -801,6 +937,10 @@ function PlannerContent() {
       const normalized = `${String(parsed.getFullYear()).padStart(4, "0")}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`;
       return Number.isFinite(parsed.getTime()) && normalized === value;
     };
+    if (clearRangeDates.length === 0) {
+      setClearRangeError(t("Выберите хотя бы один период."));
+      return;
+    }
     if (clearRangeDates.some(({ start, end }) => !validIsoDate(start) || !validIsoDate(end) || start > end)) {
       setClearRangeError(t("Проверьте даты: начало должно быть не позже конца."));
       return;
@@ -883,17 +1023,74 @@ function PlannerContent() {
 
   const changeWeekQuantum = useCallback(async (iso, value) => {
     const cellMin = value === "" ? null : Number(value);
+    const current = weeksDataRef.current[iso];
+    const previousQuantum = current?.cellMin ?? settingsRef.current.cellMin;
+    const effectiveQuantum = cellMin ?? settingsRef.current.cellMin;
+    const previousCustomTimes = current?.customTimes || [];
+    const customTimes = effectiveQuantum > previousQuantum
+      ? getQuantumConflictBoundaries(current?.days, current?.dayStart ?? settingsRef.current.dayStart, effectiveQuantum, previousCustomTimes)
+      : previousCustomTimes;
+    setSettingsLoading(true);
     try {
+      if (customTimes.length !== previousCustomTimes.length) await saveWeekCustomTimes(iso, customTimes);
       await saveWeekQuantum(iso, cellMin);
       updateWeeksData((prev) => ({
         ...prev,
-        [iso]: { ...(prev[iso] || { days: [[], [], [], [], [], [], []] }), cellMin },
+        [iso]: { ...(prev[iso] || { days: [[], [], [], [], [], [], []] }), cellMin, customTimes },
       }));
-      showToast(cellMin ? `Шаг недели: ${cellMin} мин` : "Для недели восстановлен общий шаг");
+      showToast(customTimes.length > previousCustomTimes.length ? "Шаг изменён; строки конфликтующих дел сохранены" : cellMin ? `Шаг недели: ${cellMin} мин` : "Для недели восстановлен общий шаг");
     } catch (error) {
       showToast(`Не удалось изменить шаг недели: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSettingsLoading(false);
     }
   }, [updateWeeksData, showToast]);
+
+  const validateCustomTime = useCallback((iso, afterMin, minute, excludedMin = null) => {
+    const starts = weekRowStarts(iso).filter((value) => value !== excludedMin);
+    const index = starts.indexOf(afterMin);
+    const nextBoundary = index >= 0 ? starts[index + 1] ?? weekDayEnd(iso) : weekDayEnd(iso);
+    if (!Number.isFinite(minute)) return "Введите время новой строки.";
+    if (minute % 5 !== 0) return "Время строки должно быть кратно 5 минутам.";
+    if (minute <= afterMin || minute >= nextBoundary) return "Время должно быть позже предыдущей строки и раньше следующей.";
+    if (starts.includes(minute)) return "Такая строка времени уже есть.";
+    return null;
+  }, [weekRowStarts, weekDayEnd]);
+
+  const addWeekCustomTime = useCallback(async (iso, afterMin, rawTime) => {
+    const minute = timeToMin(rawTime);
+    const error = validateCustomTime(iso, afterMin, minute);
+    if (error) return { ok: false, error };
+    const customTimes = [...new Set([...(weeksDataRef.current[iso]?.customTimes || []), minute])].sort((a, b) => a - b);
+    try {
+      await saveWeekCustomTimes(iso, customTimes);
+      updateWeeksData((prev) => ({ ...prev, [iso]: { ...(prev[iso] || { days: [[], [], [], [], [], [], []] }), customTimes } }));
+      showToast("Добавлена строка времени");
+      return { ok: true };
+    } catch (saveError) {
+      console.error("Could not save custom week time", saveError);
+      showToast("Не удалось сохранить строку времени.");
+      return { ok: false, error: "Не удалось сохранить строку времени." };
+    }
+  }, [validateCustomTime, updateWeeksData, showToast]);
+
+  const updateWeekCustomTime = useCallback(async (iso, oldMinute, afterMin, rawTime) => {
+    const minute = timeToMin(rawTime);
+    if (minute === oldMinute) return { ok: true };
+    const error = validateCustomTime(iso, afterMin, minute, oldMinute);
+    if (error) return { ok: false, error };
+    const customTimes = (weeksDataRef.current[iso]?.customTimes || []).filter((value) => value !== oldMinute).concat(minute).sort((a, b) => a - b);
+    try {
+      await saveWeekCustomTimes(iso, customTimes);
+      updateWeeksData((prev) => ({ ...prev, [iso]: { ...prev[iso], customTimes } }));
+      showToast("Время строки изменено");
+      return { ok: true };
+    } catch (saveError) {
+      console.error("Could not update custom week time", saveError);
+      showToast("Не удалось сохранить строку времени.");
+      return { ok: false, error: "Не удалось сохранить строку времени." };
+    }
+  }, [validateCustomTime, updateWeeksData, showToast]);
 
   const changeWeekDayBounds = useCallback(async (iso, field, rawValue) => {
     const wk = weeksDataRef.current[iso];
@@ -978,8 +1175,44 @@ function PlannerContent() {
     }
   }, [updateWeeksData, showToast]);
 
-  const setCellText = useCallback((iso, d, r, text) => setCellPatch(iso, d, r, { text }), [setCellPatch]);
+  const setCellText = useCallback((iso, d, r, text) => {
+    const startMin = weekRowStart(iso, r);
+    const endMin = weekRowEnd(iso, r);
+    const carryHeader = text === ""
+      ? findNextBrushHeaderCell(weeksDataRef.current[iso]?.days?.[d] || [], startMin, endMin)
+      : null;
+    setCellPatch(iso, d, r, { text });
+    if (carryHeader) setCellPatch(iso, d, r + 1, { text: carryHeader.text });
+  }, [setCellPatch, weekRowStart, weekRowEnd]);
   const setCellTask = useCallback((iso, d, r, task) => setCellPatch(iso, d, r, { task }), [setCellPatch]);
+  const setCellCategoryPick = useCallback((iso, d, r, category, sub = null) => {
+    if (!category) return;
+    snapshot(iso);
+    setCellPatch(iso, d, r, {
+      text: sub ? `${category.name} - ${sub.name}` : category.name,
+      color: category.color,
+      catId: category.id,
+      subId: sub?.id || null,
+    });
+  }, [snapshot, setCellPatch]);
+  const createCategoryForCell = useCallback((iso, d, r, rawName) => {
+    const name = rawName.trim();
+    if (!name) return;
+    const existing = categories.find((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (existing) {
+      setCellCategoryPick(iso, d, r, existing);
+      return;
+    }
+    const category = {
+      id: uid(), name,
+      color: DEFAULT_COLORS[categories.length % DEFAULT_COLORS.length],
+      subs: [],
+    };
+    snapshot(iso);
+    setCategories((previous) => [...previous, category]);
+    setCellPatch(iso, d, r, { text: category.name, color: category.color, catId: category.id, subId: null });
+    showToast(`${t("Создана категория", language)}: «${name}»`);
+  }, [categories, setCellCategoryPick, snapshot, setCellPatch, showToast, language]);
 
   // Описание конкретного дела в клетке (не подкатегории - см. CategoryPanel) -
   // читаемый текст-заметка, который можно раскрыть иконкой на самой клетке
@@ -1077,26 +1310,55 @@ function PlannerContent() {
     showToast(ok ? `Сохранено: Рефлексии ${y}.md` : "Экспорт отменён или не удался");
   }
 
-  // Выбор подкатегории прямо в клетке - цвет категории проставляется
-  // здесь ЕЩЁ РАЗ явно (а не только унаследуется), чтобы заливка гарантированно
-  // соответствовала цвету категории, даже если что-то пошло не так при заливке.
+  // Выбор из списка подкатегорий меняет только подпись и привязку.
+  // Заливка клетки уже выбрана отдельно и не должна неожиданно меняться
+  // в момент выбора текста.
   const setCellSub = useCallback((iso, d, r, category, subId) => {
     const sub = category.subs.find((s) => s.id === subId);
     if (!sub) return;
     setCellPatch(iso, d, r, {
       subId,
       text: `${category.name} - ${sub.name}`,
-      color: category.color,
       catId: category.id,
     });
   }, [setCellPatch]);
 
   const setCellDone = useCallback((iso, d, r, done) => {
-    setCellPatch(iso, d, r, { done });
+    const dayIntervals = weeksDataRef.current[iso]?.days?.[d] || [];
+    const rowStart = weekRowStart(iso, r);
+    const interval = readCellValue(dayIntervals, rowStart);
+    if (!interval.startMin && interval.startMin !== 0) return;
+    const brushLabel = (candidate) => {
+      const category = categories.find((item) => item.id === candidate.catId);
+      if (!category) return null;
+      const subcategory = category.subs?.find((item) => item.id === candidate.subId);
+      return subcategory ? `${category.name} - ${subcategory.name}` : category.name;
+    };
+    const sameBrush = (candidate) => (candidate.color || "") === (interval.color || "")
+      && (candidate.catId || null) === (interval.catId || null)
+      && (candidate.subId || null) === (interval.subId || null);
+    let index = dayIntervals.indexOf(interval);
+    if (index < 0) return;
+    while (index > 0) {
+      const current = dayIntervals[index], previous = dayIntervals[index - 1];
+      if ((current.text && current.text !== brushLabel(current)) || previous.endMin !== current.startMin || !sameBrush(previous)) break;
+      index--;
+      if (dayIntervals[index].text && dayIntervals[index].text !== brushLabel(dayIntervals[index])) break;
+    }
+    const startMin = dayIntervals[index].startMin;
+    let endMin = interval.endMin;
+    for (let nextIndex = dayIntervals.indexOf(interval) + 1; nextIndex < dayIntervals.length; nextIndex++) {
+      const next = dayIntervals[nextIndex];
+      if (next.startMin !== endMin || (next.text && next.text !== brushLabel(next)) || !sameBrush(next)) break;
+      endMin = next.endMin;
+    }
+    snapshot(iso);
+    applyLocalCellPatch(iso, d, startMin, endMin, { done });
+    scheduleCellWrite(iso, d, startMin, endMin, { done });
     // Трекер открыт - сразу пересчитываем, чтобы цифры не расходились
     // с тем, что реально отмечено в клетках (а не только по кнопке "Обновить").
     if (trackerOpenRef.current && refreshTrackerRef.current) refreshTrackerRef.current();
-  }, [setCellPatch]);
+  }, [categories, weekRowStart, snapshot, applyLocalCellPatch, scheduleCellWrite]);
 
   // Только у самой первой клетки в мазке проставляется название категории -
   // остальные просто получают цвет, как будто закрашивается один диапазон,
@@ -1124,14 +1386,13 @@ function PlannerContent() {
   // Читаем для этого локальный, ещё не изменённый снимок дня (как и
   // раньше читали newCells ДО собственной правки).
   const applyPaint = useCallback((iso, d, r, isFirst) => {
-    const cellMin = weekCellMin(iso);
     const label = active ? active.label : null;
     const useColor = active ? active.color : manualColor;
     const catId = active ? active.catId : null;
     const subId = active ? active.subId : null;
 
     const dayIntervals = ((weeksDataRef.current[iso] || {}).days || [])[d] || [];
-    const rowStart = weekDayStart(iso) + r * cellMin;
+    const rowStart = weekRowStart(iso, r);
     const existing = readCellValue(dayIntervals, rowStart);
     const sameBrush = active && existing.color
       && existing.catId === catId && (existing.subId || null) === (subId || null);
@@ -1141,21 +1402,28 @@ function PlannerContent() {
       return;
     }
 
+    const previous = r > 0 ? readCellValue(dayIntervals, weekRowStart(iso, r - 1)) : null;
+    const continuesPrevious = !!previous
+      && previous !== EMPTY_CELL
+      && previous.endMin === rowStart
+      && (previous.color || "") === (useColor || "")
+      && (previous.catId || null) === (catId || null)
+      && (previous.subId || null) === (subId || null);
     const patch = { color: useColor, catId, subId };
-    if (isFirst && label) patch.text = label;
+    if (isFirst && label) patch.text = continuesPrevious ? "" : label;
     setCellPatch(iso, d, r, patch);
 
     if (isFirst) {
       let nr = r + 1;
       while (nr < rowCountForWeek(iso)) {
-        const nextRowStart = weekDayStart(iso) + nr * cellMin;
+        const nextRowStart = weekRowStart(iso, nr);
         const nextVal = readCellValue(dayIntervals, nextRowStart);
         if (!nextVal.color || nextVal.text) break; // конец блока или заголовок следующего
         setCellPatch(iso, d, nr, { color: useColor, catId, subId });
         nr++;
       }
     }
-  }, [active, manualColor, setCellPatch, clearCellPatch, weekCellMin, weekDayStart, rowCountForWeek]);
+  }, [active, manualColor, setCellPatch, clearCellPatch, weekRowStart, rowCountForWeek]);
 
   // Ластик: протягивание мышью по клеткам одного дня очищает их полностью
   // (текст, цвет, категория, галочка) - по аналогии с заливкой, только
@@ -1171,7 +1439,7 @@ function PlannerContent() {
   const sampleAndActivateBrush = useCallback((iso, d, r) => {
     setEyedropperActive(false);
     const dayIntervals = ((weeksDataRef.current[iso] || {}).days || [])[d] || [];
-    const val = readCellValue(dayIntervals, weekDayStart(iso) + r * weekCellMin(iso));
+    const val = readCellValue(dayIntervals, weekRowStart(iso, r));
     if (!val.color) { showToast("Пустая клетка - нечего взять пипеткой"); return; }
     if (val.catId) {
       const cat = categories.find((c) => c.id === val.catId);
@@ -1185,7 +1453,7 @@ function PlannerContent() {
     }
     setMode("paint");
     showToast("Пипетка: краска взята, включена Заливка");
-  }, [categories, showToast, weekCellMin, weekDayStart]);
+  }, [categories, showToast, weekRowStart]);
 
   const handleCellDown = useCallback((iso, d, r) => {
     if (eyedropperActiveRef.current) { sampleAndActivateBrush(iso, d, r); return; }
@@ -1264,18 +1532,19 @@ function PlannerContent() {
     (async () => {
       await Promise.all([...targetWeekSet].map((iso) => ensureLoadedData(iso)));
       const srcWk = weeksDataRef.current[o.iso] || { days: [[], [], [], [], [], [], []] };
-      const sourceStep = weekCellMin(o.iso);
-      const sourceDayStart = weekDayStart(o.iso);
       const moves = [];
       for (let d = o.dMin; d <= o.dMax; d++) {
         const dayIntervals = srcWk.days[d] || [];
         for (let r = o.rMin; r <= o.rMax; r++) {
-          const sourceStart = sourceDayStart + r * sourceStep;
+          const sourceStart = weekRowStart(o.iso, r);
           const val = readCellValue(dayIntervals, sourceStart);
           if (!(val.text || val.color || val.task)) continue;
-          const targetStart = sourceStart + dRow * sourceStep;
           const targetDate = addDays(sourceMonday, d + dCol);
           const targetIso = toISO(getMonday(targetDate));
+          const targetRow = r + dRow;
+          if (targetRow < 0 || targetRow >= rowCountForWeek(targetIso)) continue;
+          const targetStart = weekRowStart(targetIso, targetRow);
+          const targetEnd = weekRowEnd(targetIso, targetRow);
           const targetDayStart = weekDayStart(targetIso);
           const targetDayEnd = weekDayEnd(targetIso);
           if (targetStart < targetDayStart || targetStart >= targetDayEnd) continue;
@@ -1286,7 +1555,7 @@ function PlannerContent() {
             toIso: targetIso,
             toD: targetDayIdx,
             toStartMin: targetStart,
-            toEndMin: Math.min(targetDayEnd, targetStart + sourceStep),
+            toEndMin: Math.min(targetDayEnd, targetEnd),
             val,
           });
         }
@@ -1326,10 +1595,8 @@ function PlannerContent() {
         const w = o.dMax - o.dMin;
         const wrappedD0 = ((o.dMin + dCol) % 7 + 7) % 7;
         const nd0 = Math.min(wrappedD0, 6 - Math.min(w, 6));
-        const targetStep = weekCellMin(primaryTargetIso);
-        const shiftedStart = sourceDayStart + o.rMin * sourceStep + dRow * sourceStep;
-        const targetRow = Math.floor((shiftedStart - weekDayStart(primaryTargetIso)) / targetStep);
-        const rowSpan = Math.ceil(((o.rMax - o.rMin + 1) * sourceStep) / targetStep);
+        const rowSpan = o.rMax - o.rMin + 1;
+        const targetRow = o.rMin + dRow;
         const nextRMin = clamp(targetRow, 0, rowCountForWeek(primaryTargetIso) - rowSpan);
         const nextSel = { iso: primaryTargetIso, dMin: nd0, dMax: nd0 + w, rMin: nextRMin, rMax: nextRMin + rowSpan - 1 };
         selRef.current = nextSel;
@@ -1343,7 +1610,7 @@ function PlannerContent() {
         }));
       }
     })();
-  }, [weekCellMin, weekDayStart, weekDayEnd, rowCountForWeek, snapshot, ensureLoadedData, applyLocalCellPatch, scheduleCellWrite, clearCellPatch, maybeRefreshTracker, year, showToast]);
+  }, [weekDayStart, weekDayEnd, weekRowStart, weekRowEnd, rowCountForWeek, snapshot, ensureLoadedData, applyLocalCellPatch, scheduleCellWrite, clearCellPatch, maybeRefreshTracker, year, showToast]);
 
   useEffect(() => {
     function onUp() {
@@ -1437,14 +1704,14 @@ function PlannerContent() {
     for (let d = sel.dMin; d <= sel.dMax; d++) {
       const dayIntervals = wk.days[d] || [];
       for (let r = sel.rMin; r <= sel.rMax; r++) {
-        const val = readCellValue(dayIntervals, weekDayStart(sel.iso) + r * weekCellMin(sel.iso));
+        const val = readCellValue(dayIntervals, weekRowStart(sel.iso, r));
         if (val.text || val.color || val.task) relCells.push({ dc: d - sel.dMin, dr: r - sel.rMin, val });
       }
     }
     clipboardRef.current = relCells;
     setClipboardCount(relCells.length);
     showToast(relCells.length ? "Скопировано" : "Выделенные клетки пусты");
-  }, [showToast, weekDayStart, weekCellMin]);
+  }, [showToast, weekRowStart]);
 
   const pasteSelection = useCallback(() => {
     const sel = selRef.current;
@@ -1786,6 +2053,19 @@ function PlannerContent() {
         if (code === "ArrowLeft") { e.preventDefault(); previewMoveBy(-1, 0); return; }
         if (code === "ArrowRight") { e.preventDefault(); previewMoveBy(1, 0); return; }
       }
+      if (mod && e.shiftKey && !e.altKey && !isTypingTarget(document.activeElement)) {
+        const view = { Digit1: "weeks", Digit2: "weekTiles", Digit3: "months", Digit4: "years" }[code];
+        if (view) {
+          e.preventDefault();
+          if (activeDockPanel === "clearRange") {
+            const scope = { Digit1: "custom", Digit2: "week", Digit3: "month", Digit4: "year" }[code];
+            setClearRangeMode(scope);
+          } else {
+            setViewMode(view);
+          }
+          return;
+        }
+      }
       // Прокрутка стрелками/PageUp/PageDown - работает независимо от
       // общего "однокнопочного" блока ниже, поэтому проверяется раньше
       // и с собственной обработкой модификаторов: Ctrl+стрелка крутит
@@ -1868,7 +2148,7 @@ function PlannerContent() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mode, undo, copySelection, pasteSelection, goToCurrentWeek, zoomBy, previewMoveBy, commitPendingMove, cancelPendingMove, jumpToRelativeWeek, fullscreenWeekIso, activeDockPanel, clearRangeBusy, openClearRangeDialog]);
+  }, [mode, undo, copySelection, pasteSelection, goToCurrentWeek, zoomBy, previewMoveBy, commitPendingMove, cancelPendingMove, jumpToRelativeWeek, fullscreenWeekIso, activeDockPanel, clearRangeBusy, openClearRangeDialog, setClearRangeMode]);
 
   function updateSettings(patch) {
     const prev = settingsRef.current;
@@ -1886,6 +2166,34 @@ function PlannerContent() {
       showToast(`Изменение нарушит границы недели ${invalidWeek[0]}; сначала скорректируйте её часы`);
       return;
     }
+    const remotePatch = { ...patch };
+    if ("dayStart" in patch) remotePatch.dayStart = next.dayStart;
+    if ("dayEnd" in patch) remotePatch.dayEnd = next.dayEnd;
+    if ("cellMin" in patch && next.cellMin > prev.cellMin) {
+      setSettingsLoading(true);
+      (async () => {
+        try {
+          const preservedWeeks = await preserveGlobalQuantumConflicts(next.dayStart, next.cellMin);
+          await Promise.all(preservedWeeks.map(([monday, times]) => saveWeekCustomTimes(monday, times)));
+          await updateSettingsRemote(remotePatch);
+          const preservedByWeek = new Map(preservedWeeks);
+          updateWeeksData((previous) => {
+            const updated = { ...previous };
+            for (const [monday, times] of preservedByWeek) if (updated[monday]) updated[monday] = { ...updated[monday], customTimes: times };
+            return updated;
+          });
+          settingsRef.current = next;
+          startSettingsTransition(() => { setSettings(next); });
+          if (preservedWeeks.length) showToast("Шаг изменён; строки конфликтующих дел сохранены");
+        } catch (error) {
+          console.error("Could not preserve existing week intervals", error);
+          showToast(`Не удалось безопасно изменить общий шаг: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          setSettingsLoading(false);
+        }
+      })();
+      return;
+    }
     // settingsRef обновляем сразу и синхронно - остальной код (обработчики
     // кликов по клеткам и т.п.) читает именно его, ему без разницы,
     // когда именно перерисуется сама сетка.
@@ -1893,13 +2201,11 @@ function PlannerContent() {
     // В Rust уходят уже ОТКЛЭМПЛЕННЫЕ значения (не сырой patch) - иначе
     // сервер хранил бы нескорректированный dayStart/dayEnd, а локальный
     // state - скорректированный, и они бы разошлись.
-    const remotePatch = { ...patch };
-    if ("dayStart" in patch) remotePatch.dayStart = next.dayStart;
-    if ("dayEnd" in patch) remotePatch.dayEnd = next.dayEnd;
+    if ("cellMin" in patch) setSettingsLoading(true);
     updateSettingsRemote(remotePatch).catch((error) => {
       console.error("Could not save global settings", error);
       showToast(`Не удалось сохранить настройки: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    }).finally(() => { if ("cellMin" in patch) setSettingsLoading(false); });
     startSettingsTransition(() => { setSettings(next); });
   }
 
@@ -1978,6 +2284,19 @@ function PlannerContent() {
     showToast(`Год ${num} заведён`);
   }
 
+  async function removeYear(yearToDelete) {
+    if (yearToDelete === REAL_YEAR) return;
+    if (!window.confirm(t("Убрать этот год из списка? Данные календаря останутся.", language))) return;
+    try {
+      await deleteCreatedYear(yearToDelete);
+      const nextYears = createdYears.filter((item) => item !== yearToDelete);
+      setCreatedYears(nextYears);
+      if (year === yearToDelete) setYear(nextYears.includes(REAL_YEAR) ? REAL_YEAR : nextYears[0]);
+    } catch (error) {
+      showToast(`Не удалось удалить год: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // Быстрый переход к первой неделе месяца (используется селектором месяца
   // в шапке и кликом по плитке месяца в уменьшенном масштабе).
   async function jumpToMonth(monthIdx, targetYear) {
@@ -2014,13 +2333,12 @@ function PlannerContent() {
         const iso = toISO(m);
         const wk = weeksDataRef.current[iso];
         if (!wk) return;
-        const step = weekCellMin(iso);
         (wk.days || []).forEach((dayIntervals, day) => {
           dayIntervals.forEach((val) => {
             const textMatch = val.text && val.text.toLowerCase().includes(q);
             const taskMatch = val.task && val.task.toLowerCase().includes(q);
             if (!textMatch && !taskMatch) return;
-            const r = Math.floor((val.startMin - weekDayStart(iso)) / step);
+            const r = weekRowAtTime(iso, val.startMin);
             const dedupKey = `${iso}|${day}|${r}`;
             if (seen.has(dedupKey)) return;
             seen.add(dedupKey);
@@ -2844,7 +3162,7 @@ function PlannerContent() {
 
   function onAgendaJump(ev) {
     const iso = agendaIso;
-    const r = Math.floor((ev.start - weekDayStart(agendaIso)) / weekCellMin(agendaIso));
+    const r = weekRowAtTime(agendaIso, ev.start);
     setMountedWeeks((prev) => ({ ...prev, [iso]: true }));
     setHighlight({ iso, d: agendaDayIdx, r });
     setTimeout(() => setHighlight(null), 2200);
@@ -3318,11 +3636,6 @@ function PlannerContent() {
     setMarkedDays(new Set());
   }
 
-  const legendOptions = useMemo(
-    () => categories.flatMap((c) => [c.name, ...c.subs.map((s) => `${c.name} - ${s.name}`)]),
-    [categories]
-  );
-
   // Список действий для командной палитры (Ctrl+K) - придуман сам по
   // частым сценариям: переходы по неделям/дням, режимы, панели дока,
   // масштаб, экспорт. У панелей дока уже есть свои буквенные хоткеи
@@ -3413,10 +3726,7 @@ function PlannerContent() {
   return (
     <div className={`planner-root ${spaceScrollLock ? "space-scroll-lock" : ""} ${eyedropperActive ? "eyedropper-active" : ""}`} data-theme={settings.theme}>
       <GlobalStyles />
-      <datalist id="planner-legend">
-        {legendOptions.map((l) => <option key={l} value={l} />)}
-      </datalist>
-
+      {settingsLoading && <div className="settings-loading-overlay" role="status" aria-label={t("Загрузка недели", language)}><img src={forgetMeNotIcon} alt="" className="startup-flower-spin" /></div>}
       <div className="scroll-rail scroll-rail-top" />
       <div className="scroll-rail scroll-rail-bottom" />
       {canScrollUp && (
@@ -3616,7 +3926,7 @@ function PlannerContent() {
             )}
             <div className="zoom-group">
               <button onClick={() => zoomBy(-1)} className="icon-btn tiny-wrap" title="Уменьшить масштаб (дальше - недели плитками, затем месяцы, затем годы)" style={{ width: 26, height: 26 }}>{keyTip("-")}<ZoomOut size={13} /></button>
-              <span className="zoom-label">
+              <span className="zoom-label" title={t("Ctrl+Shift+1: недели; 2: недели плитками; 3: месяцы; 4: годы", language)}>
                 {viewMode === "months" ? "Месяцы" : viewMode === "years" ? "Годы" : viewMode === "weekTiles" ? "Недели плитками" : `${Math.round((settings.zoom || 1) * 100)}%`}
               </span>
               <button onClick={() => zoomBy(1)} className="icon-btn tiny-wrap" title="Увеличить масштаб" style={{ width: 26, height: 26 }}>{keyTip("+")}<ZoomIn size={13} /></button>
@@ -3632,14 +3942,37 @@ function PlannerContent() {
       </div>
 
       {viewMode === "months" && (
-        <MonthsGrid year={year} yearList={yearList} weeksData={weeksData} onOpenMonth={(mi) => jumpToMonth(mi, year)} />
+        <MonthsGrid
+          year={year}
+          yearList={yearList}
+          weeksData={weeksData}
+          onOpenMonth={(mi) => jumpToMonth(mi, year)}
+          selectionMode={activeDockPanel === "clearRange" && clearRangeScope === "month"}
+          selectedMonths={clearRangeMonths}
+          onToggleMonth={(month) => setClearRangeMonths((previous) => (
+            previous.includes(month)
+              ? previous.filter((value) => value !== month)
+              : [...previous, month].sort((left, right) => left - right)
+          ))}
+        />
       )}
       {viewMode === "years" && (
         <YearsGrid
-          years={createdYears}
+          years={activeDockPanel === "clearRange" && clearRangeScope === "year"
+            ? [...new Set([...createdYears, ...clearRangeYears])].sort((left, right) => left - right)
+            : createdYears}
           currentYear={year}
           onOpenYear={(y) => { setYear(y); setViewMode("months"); }}
           onCreateYear={() => setCreateYearModalOpen(true)}
+          onDeleteYear={removeYear}
+          protectedYear={REAL_YEAR}
+          selectionMode={activeDockPanel === "clearRange" && clearRangeScope === "year"}
+          selectedYears={clearRangeYears}
+          onToggleYear={(selectedYear) => setClearRangeYears((previous) => (
+            previous.includes(selectedYear)
+              ? previous.filter((value) => value !== selectedYear)
+              : [...previous, selectedYear].sort((left, right) => left - right)
+          ))}
         />
       )}
       {viewMode === "weekTiles" && (
@@ -3651,8 +3984,10 @@ function PlannerContent() {
           onSetWeekNumber={setWeekNumber}
           onOpenWeek={(iso) => { setViewMode("weeks"); jumpToDate(new Date(iso + "T00:00:00")); }}
           selectionMode={activeDockPanel === "clearRange" && clearRangeScope === "week"}
-          selectedWeekIso={clearRangeAnchor}
-          onSelectWeek={(iso) => setClearRangeAnchor(iso)}
+          selectedWeekIsos={clearRangeWeeks}
+          onToggleWeek={(iso) => setClearRangeWeeks((previous) => (
+            previous.includes(iso) ? previous.filter((value) => value !== iso) : [...previous, iso].sort()
+          ))}
         />
       )}
       {viewMode === "weeks" && (
@@ -3669,18 +4004,22 @@ function PlannerContent() {
                   {showMonthHeader && <div className="month-divider">{MONTHS_NOM[monthIdx]}</div>}
                   <LazyWeek
                     monday={monday}
-                    settings={{ ...settings, cellMin: weekCellMin(iso), dayStart: weekDayStart(iso), dayEnd: weekDayEnd(iso) }}
+                    settings={{ ...settings, cellMin: weekCellMin(iso), dayStart: weekDayStart(iso), dayEnd: weekDayEnd(iso), customTimes: weeksData[iso]?.customTimes || [] }}
                     mode={mode}
                     iso={iso}
                     fullscreen={fullscreenWeekIso === iso}
                     onToggleFullscreen={() => setFullscreenWeekIso((current) => current === iso ? null : iso)}
                     categories={categories}
+                    favoriteCategoryIds={favoriteCategoryIds}
+                    onDeleteCustomTime={deleteWeekCustomTime}
                     weekData={weeksData[iso]}
                     onCellDown={handleCellDown}
                     onCellEnter={handleCellEnter}
                     onCellText={setCellText}
                     onCellTask={setCellTask}
                     onCellSubPick={setCellSub}
+                    onCellCategoryPick={setCellCategoryPick}
+                    onCreateCategoryForCell={createCategoryForCell}
                     onCellDone={setCellDone}
                     onCellDescription={setCellDescription}
                     onHoverDescription={setHoverDescTooltip}
@@ -3699,6 +4038,8 @@ function PlannerContent() {
                     onWeekQuantumChange={changeWeekQuantum}
                     onWeekDayBoundsChange={changeWeekDayBounds}
                     onResetWeekDayBounds={resetWeekDayBounds}
+                    onAddCustomTime={addWeekCustomTime}
+                    onUpdateCustomTime={updateWeekCustomTime}
                     markingMode={activeDockPanel === "templates" || (activeDockPanel === "tracker" && trackerTab === "interval")}
                     weekMarked={markedWeeks.has(iso)}
                     markedDays={markedDays}
@@ -3734,7 +4075,15 @@ function PlannerContent() {
               </div>
               <div className={`dock-flyout-body ${activeDockPanel === "categories" ? "dock-category-body" : ""}`}>
                 {activeDockPanel === "categories" && (
-                  <CategoryPanel categories={categories} setCategories={setCategories} active={active} setActive={setActive} onPickCategory={() => setMode("paint")} />
+                  <CategoryPanel
+                    categories={categories}
+                    setCategories={setCategories}
+                    active={active}
+                    setActive={setActive}
+                    onPickCategory={() => setMode("paint")}
+                    favoriteCategoryIds={favoriteCategoryIds}
+                    onToggleFavoriteCategory={toggleFavoriteCategory}
+                  />
                 )}
                 {activeDockPanel === "todo" && (
                   <TodoPanel
@@ -3809,7 +4158,9 @@ function PlannerContent() {
                       <span>{t("Очистка календаря")}</span>
                     </div>
                     <div className="hint-text">{t("Выберите масштаб календаря и период, затем нажмите «Очистить».")}</div>
-                    {clearRangeScope === "week" && <div className="hint-text">{t("Выберите неделю на плитках календаря.")}</div>}
+                    {clearRangeScope === "week" && <div className="hint-text">{t("Отметьте одну или несколько недель на плитках календаря; названия недель во время очистки не редактируются.")}</div>}
+                    {clearRangeScope === "month" && <div className="hint-text">{t("Отметьте один или несколько месяцев в календаре.")}</div>}
+                    {clearRangeScope === "year" && <div className="hint-text">{t("Отметьте галочками годы, которые нужно очистить.")}</div>}
                     <div className="clear-range-mode-grid" role="group" aria-label={t("Масштаб и период очистки")}>
                       {[
                         ["week", "Неделя"],
@@ -3828,16 +4179,8 @@ function PlannerContent() {
                         </button>
                       ))}
                     </div>
-                    {(clearRangeScope === "month" || clearRangeScope === "year") && (
+                    {clearRangeScope === "month" && (
                       <div className="clear-range-period-fields">
-                        {clearRangeScope === "month" && (
-                          <label className="clear-range-field">
-                            <span className="field-label">{t("Месяц")}</span>
-                            <select className="time-input" value={clearRangeMonth} onChange={(e) => setClearRangeMonth(Number(e.target.value))}>
-                              {MONTHS_NOM.map((month, index) => <option key={month} value={index}>{t(month)}</option>)}
-                            </select>
-                          </label>
-                        )}
                         <label className="clear-range-field">
                           <span className="field-label">{t("Год")}</span>
                           <input
@@ -3849,7 +4192,10 @@ function PlannerContent() {
                             onChange={(e) => {
                               const nextYear = e.target.value === "" ? 0 : Number(e.target.value);
                               setClearRangeYear(nextYear);
-                              if (clearRangeScope === "month" && nextYear >= 1 && nextYear <= 9999) setYear(nextYear);
+                              if (nextYear >= 1 && nextYear <= 9999) {
+                                setYear(nextYear);
+                                setClearRangeYears([nextYear]);
+                              }
                             }}
                           />
                         </label>
@@ -4002,7 +4348,7 @@ function PlannerContent() {
                         {searchResults.map((res, i) => (
                           <div key={i} onClick={() => goToResult(res)} className="search-result-item">
                             <span data-no-translate>{res.text}</span>
-                            <span className="hint-text">{WEEKDAYS_SHORT[res.d]}, {formatRange(res.monday)}, {minToTime(weekDayStart(res.iso) + res.r * weekCellMin(res.iso))}</span>
+                            <span className="hint-text">{WEEKDAYS_SHORT[res.d]}, {formatRange(res.monday)}, {minToTime(weekRowStart(res.iso, res.r))}</span>
                           </div>
                         ))}
                       </div>

@@ -40,28 +40,58 @@ export function readCellValue(dayIntervals, rowStart) {
   return findIntervalAt(dayIntervals, rowStart) || EMPTY_CELL;
 }
 
-export function isSameBrushRun(previous, current, rowStart) {
-  return !!previous
+export function isSameBrushRun(previous, current, rowStart, brushLabel = null) {
+  const sameBrush = !!previous
     && previous.endMin >= rowStart
     && (previous.color || "") === (current.color || "")
     && (previous.catId || null) === (current.catId || null)
     && (previous.subId || null) === (current.subId || null);
+  if (!sameBrush) return false;
+  if (!current.text || current.text === previous.text) return true;
+  return !!brushLabel && current.text === brushLabel;
 }
 
-export function brushHeaderKey(value) {
-  return JSON.stringify([value.color || "", value.catId || null, value.subId || null]);
+export function findNextBrushHeaderCell(dayIntervals, startMin, endMin) {
+  const current = findIntervalAt(dayIntervals, startMin);
+  if (!current?.color) return null;
+  const next = findIntervalAt(dayIntervals, endMin);
+  if (!next || next.text) return null;
+  const sameBrush = (left, right) => (left.color || "") === (right.color || "")
+    && (left.catId || null) === (right.catId || null)
+    && (left.subId || null) === (right.subId || null);
+  if (!sameBrush(current, next)) return null;
+
+  let endOfCoveredRange = current;
+  let rangeIndex = dayIntervals.indexOf(current);
+  while (endOfCoveredRange.endMin < endMin) {
+    const following = dayIntervals[rangeIndex + 1];
+    if (!following || endOfCoveredRange.endMin !== following.startMin || !sameBrush(endOfCoveredRange, following)) return null;
+    endOfCoveredRange = following;
+    rangeIndex++;
+  }
+  if (!sameBrush(endOfCoveredRange, next)) return null;
+
+  let header = current.text || "";
+  let index = dayIntervals.indexOf(current);
+  while (!header && index > 0) {
+    const previous = dayIntervals[index - 1];
+    const following = dayIntervals[index];
+    if (previous.endMin !== following.startMin || !sameBrush(previous, following)) break;
+    header = previous.text || "";
+    index--;
+  }
+  return header ? { startMin: endMin, text: header } : null;
 }
 
-export function resolveBrushRunHeader(current, startsNewRun, headersByBrush) {
-  if (current.text) return current.text;
-  if (!startsNewRun || !current.color) return "";
-  return headersByBrush.get(brushHeaderKey(current)) || "";
+export function resolveBrushRunHeader(current, startsNewRun) {
+  if (!startsNewRun) return "";
+  return current.text || "";
 }
 
 export function shouldHideRepeatedHeader(previous, current, rowStart, lastHeader) {
   return !!current.text
     && current.text === lastHeader
-    && isSameBrushRun(previous, current, rowStart);
+    && isSameBrushRun(previous, current, rowStart, lastHeader);
 }
 
 /* ------------------------------------------------------------------ */

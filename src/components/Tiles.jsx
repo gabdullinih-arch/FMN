@@ -1,9 +1,10 @@
 import { useRef, useState, useEffect, useMemo } from "react";
+import { Trash2 } from "lucide-react";
 import { MONTHS_NOM } from "../constants.js";
 import { toISO, addDays } from "../utils.js";
 import { useI18n, t } from "../i18n.js";
 
-export function MonthTile({ name, monthIdx, year, weeksInMonth, weeksData, onOpen }) {
+export function MonthTile({ name, monthIdx, year, weeksInMonth, weeksData, onOpen, selectionMode = false, selected = false, onToggle }) {
   const { language } = useI18n();
   const ref = useRef(null);
   const [visible, setVisible] = useState(false);
@@ -43,17 +44,31 @@ export function MonthTile({ name, monthIdx, year, weeksInMonth, weeksData, onOpe
   const now = new Date();
   const isCurrent = monthIdx === now.getMonth() && year === now.getFullYear();
 
+  const statsLabel = stats && stats.planned > 0
+    ? t(`${stats.done}/${stats.planned} выполнено`, language)
+    : stats ? t("пусто", language) : "\u00a0";
+  if (selectionMode) {
+    return (
+      <label ref={ref} className={`view-tile month-tile-select ${selected ? "view-tile-selected" : ""} ${isCurrent ? "view-tile-current" : ""}`}>
+        <input type="checkbox" checked={selected} onChange={() => onToggle?.(monthIdx)} />
+        <span className="month-tile-select-content">
+          <span className="view-tile-name">{t(name, language)}</span>
+          <span className={`view-tile-stats ${stats?.planned === 0 ? "view-tile-stats-empty" : ""}`}>{statsLabel}</span>
+        </span>
+      </label>
+    );
+  }
   return (
-    <button ref={ref} onClick={onOpen} className={`view-tile ${isCurrent ? "view-tile-current" : ""}`}>
-      <span className="view-tile-name">{name}</span>
-      {stats && stats.planned > 0 && <span className="view-tile-stats">{t(`${stats.done}/${stats.planned} выполнено`, language)}</span>}
-      {stats && stats.planned === 0 && <span className="view-tile-stats view-tile-stats-empty">{t("пусто", language)}</span>}
-      {!stats && <span className="view-tile-stats view-tile-stats-empty">&nbsp;</span>}
+    <button ref={ref} type="button" onClick={onOpen} className={`view-tile ${isCurrent ? "view-tile-current" : ""}`}>
+      <span className="view-tile-name">{t(name, language)}</span>
+      {stats && stats.planned > 0 && <span className="view-tile-stats">{statsLabel}</span>}
+      {stats && stats.planned === 0 && <span className="view-tile-stats view-tile-stats-empty">{statsLabel}</span>}
+      {!stats && <span className="view-tile-stats view-tile-stats-empty">{statsLabel}</span>}
     </button>
   );
 }
 
-export function MonthsGrid({ year, yearList, weeksData, onOpenMonth }) {
+export function MonthsGrid({ year, yearList, weeksData, onOpenMonth, selectionMode = false, selectedMonths = [], onToggleMonth }) {
   return (
     <div className="tiles-grid">
       {MONTHS_NOM.map((name, monthIdx) => {
@@ -67,6 +82,9 @@ export function MonthsGrid({ year, yearList, weeksData, onOpenMonth }) {
             year={year}
             weeksInMonth={weeksInMonth}
             weeksData={weeksData}
+            selectionMode={selectionMode}
+            selected={selectedMonths.includes(monthIdx)}
+            onToggle={onToggleMonth}
             onOpen={() => onOpenMonth(monthIdx)}
           />
         );
@@ -75,16 +93,27 @@ export function MonthsGrid({ year, yearList, weeksData, onOpenMonth }) {
   );
 }
 
-export function YearsGrid({ years, currentYear, onOpenYear, onCreateYear }) {
+export function YearsGrid({ years, currentYear, onOpenYear, onCreateYear, onDeleteYear, protectedYear, selectionMode = false, selectedYears = [], onToggleYear }) {
   const { language } = useI18n();
+  const selectedYearSet = new Set(selectedYears);
   return (
     <div className="tiles-grid">
       {years.map((y) => (
-        <button key={y} onClick={() => onOpenYear(y)} className={`view-tile ${y === currentYear ? "view-tile-current" : ""}`}>
-          <span className="view-tile-name">{y}</span>
-        </button>
+        <div key={y} className={`year-tile-wrap ${selectionMode ? "year-tile-wrap-selectable" : ""}`}>
+          {selectionMode ? (
+            <label className={`view-tile year-tile-select ${selectedYearSet.has(y) ? "view-tile-selected" : ""} ${y === currentYear ? "view-tile-current" : ""}`}>
+              <input type="checkbox" checked={selectedYearSet.has(y)} onChange={() => onToggleYear?.(y)} />
+              <span className="view-tile-name">{y}</span>
+            </label>
+          ) : (
+            <button type="button" onClick={() => onOpenYear(y)} className={`view-tile ${y === currentYear ? "view-tile-current" : ""}`}>
+              <span className="view-tile-name">{y}</span>
+            </button>
+          )}
+          {!selectionMode && onDeleteYear && y !== protectedYear && <button type="button" className="year-tile-delete icon-btn subtle" onClick={(event) => { event.stopPropagation(); onDeleteYear(y); }} title={t("Удалить этот год", language)} aria-label={t("Удалить этот год", language)}><Trash2 size={13} /></button>}
+        </div>
       ))}
-      {onCreateYear && (
+      {!selectionMode && onCreateYear && (
         <button onClick={onCreateYear} className="view-tile view-tile-create" title="Завести новый год">
           <span className="view-tile-name">{t("+ Завести год", language)}</span>
         </button>

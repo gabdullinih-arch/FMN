@@ -95,10 +95,13 @@ fn main() {
             cmd_update_settings,
             cmd_get_week_quantum,
             cmd_set_week_quantum,
+            cmd_set_week_custom_times,
+            cmd_preserve_global_quantum_conflicts,
             cmd_get_week_day_bounds,
             cmd_set_week_day_bounds,
             cmd_list_created_years,
             cmd_add_created_year,
+            cmd_delete_created_year,
             cmd_set_week_label,
             cmd_get_week_labels,
             cmd_add_template,
@@ -236,6 +239,7 @@ struct WeekDataDto {
     cell_min: Option<i64>,
     day_start: Option<i64>,
     day_end: Option<i64>,
+    custom_times: Vec<i64>,
 }
 
 #[tauri::command]
@@ -246,11 +250,13 @@ fn cmd_get_week_data(state: State<DbState>, monday: String) -> Result<WeekDataDt
         .map_err(|error| error.to_string())?;
     let bounds = get_week_day_bounds(&conn, &monday).map_err(|error| error.to_string())?;
     let cell_min = get_week_quantum(&conn, &monday).map_err(|error| error.to_string())?;
+    let custom_times = get_week_custom_times(&conn, &monday).map_err(|error| error.to_string())?;
     Ok(WeekDataDto {
         days,
         cell_min,
         day_start: bounds.as_ref().and_then(|value| value.day_start),
         day_end: bounds.and_then(|value| value.day_end),
+        custom_times,
     })
 }
 
@@ -515,6 +521,18 @@ fn cmd_set_week_quantum(state: State<DbState>, monday: String, cell_min: Option<
 }
 
 #[tauri::command]
+fn cmd_set_week_custom_times(state: State<DbState>, monday: String, times: Vec<i64>) -> Result<(), String> {
+    let conn = state.0.lock().unwrap();
+    set_week_custom_times(&conn, &monday, &times).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cmd_preserve_global_quantum_conflicts(state: State<DbState>, day_start: i64, quantum: i64) -> Result<Vec<(String, Vec<i64>)>, String> {
+    let conn = state.0.lock().unwrap();
+    preserve_global_quantum_conflicts(&conn, day_start, quantum).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn cmd_get_week_day_bounds(state: State<DbState>, monday: String) -> Result<Option<WeekDayBounds>, String> {
     let conn = state.0.lock().unwrap();
     get_week_day_bounds(&conn, &monday).map_err(|e| e.to_string())
@@ -540,6 +558,12 @@ fn cmd_list_created_years(state: State<DbState>) -> Result<Vec<i64>, String> {
 fn cmd_add_created_year(state: State<DbState>, year: i64) -> Result<(), String> {
     let conn = state.0.lock().unwrap();
     add_created_year(&conn, year).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cmd_delete_created_year(state: State<DbState>, year: i64) -> Result<(), String> {
+    let conn = state.0.lock().unwrap();
+    delete_created_year(&conn, year).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

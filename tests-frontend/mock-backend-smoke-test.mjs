@@ -37,7 +37,7 @@ const db = {
     { id: "c2", name: "Работа", color: "#3B5AA6" },
   ],
   subcategories: [],
-  templates: [], recurringRules: [], todos: [], allDayEvents: [], weekLabels: {}, weekQuantums: {}, weekDayBounds: {}, createdYears: [],
+  templates: [], recurringRules: [], todos: [], allDayEvents: [], weekLabels: {}, weekQuantums: {}, weekDayBounds: {}, weekCustomTimes: {}, createdYears: [],
   planScriptWatchers: [], watchIndicators: [],
 };
 
@@ -53,7 +53,8 @@ const futureTargetDate = `${futureTarget.getFullYear()}-${String(futureTarget.ge
 const futureTargetMonday = new Date(futureTarget);
 futureTargetMonday.setDate(futureTargetMonday.getDate() - ((futureTargetMonday.getDay() + 6) % 7));
 const futureMondayIso = `${futureTargetMonday.getFullYear()}-${String(futureTargetMonday.getMonth() + 1).padStart(2, "0")}-${String(futureTargetMonday.getDate()).padStart(2, "0")}`;
-const futureOtherDate = mondayPlusDays(futureMondayIso, 2);
+const futureTargetDayIdx = (futureTarget.getDay() + 6) % 7;
+const futureOtherDate = mondayPlusDays(futureMondayIso, (futureTargetDayIdx + 1) % 7);
 const futureWeekBefore = {
   [futureTargetDate]: [{ startMin: 840, endMin: 900, text: "Existing future item", task: "", description: "", color: "#2E7D74", catId: "c1", subId: null, done: false, moved: false }],
   [futureOtherDate]: [{ startMin: 600, endMin: 660, text: "Other day in future week", task: "", description: "", color: "#2E7D74", catId: "c1", subId: null, done: false, moved: false }],
@@ -82,7 +83,7 @@ window.__TAURI_INTERNALS__ = {
         const getData = () => {
           const days = [];
           for (let d = 0; d < 7; d++) days.push(db.intervalsByDate[mondayPlusDays(args.monday, d)] || []);
-          return { days, cellMin: db.weekQuantums[args.monday] ?? null, ...(db.weekDayBounds[args.monday] || {}) };
+          return { days, cellMin: db.weekQuantums[args.monday] ?? null, customTimes: db.weekCustomTimes[args.monday] || [], ...(db.weekDayBounds[args.monday] || {}) };
         };
         if (args.monday === holdWeekDataIso && !releaseHeldWeekData) {
           return new Promise((resolve) => { releaseHeldWeekData = () => resolve(getData()); });
@@ -161,6 +162,10 @@ window.__TAURI_INTERNALS__ = {
       case "cmd_set_week_quantum":
         if (args.cellMin == null) delete db.weekQuantums[args.monday];
         else db.weekQuantums[args.monday] = args.cellMin;
+        return null;
+      case "cmd_set_week_custom_times":
+        if (args.times.length) db.weekCustomTimes[args.monday] = args.times;
+        else delete db.weekCustomTimes[args.monday];
         return null;
       case "cmd_list_categories": return db.categories;
       case "cmd_list_subcategories": return db.subcategories;
@@ -577,6 +582,47 @@ nativeSelSetter.call(cellMinSelect, "10");
 cellMinSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
 await settle(5, 150);
 console.log("db.settings.cellMin:", db.settings.cellMin, "(ожидаем 10)");
+assert.equal(db.settings.cellMin, 10, "шаг календаря должен измениться на 10 минут");
+
+console.log("\n=== пользовательская строка: меню поверх сетки, подсветка, удаление и Undo ===");
+const timeGrid = window.document.querySelector(".week-grid-head");
+const originalTimeColumns = timeGrid.style.gridTemplateColumns;
+const addTimeButton = [...window.document.querySelectorAll(".row-time-add")].find((button) => !button.disabled);
+addTimeButton.click();
+await settle(2, 40);
+const customTimeForm = window.document.querySelector(".custom-time-editor-form");
+assert.ok(customTimeForm, "кнопка + должна открывать редактор времени");
+assert.equal(timeGrid.style.gridTemplateColumns, originalTimeColumns, "редактор времени не должен расширять колонку часов");
+assert.equal(window.getComputedStyle(customTimeForm).position, "absolute", "редактор должен накладываться поверх сетки, не участвуя в её ширине");
+assert.equal(window.getComputedStyle(customTimeForm).flexWrap, "wrap", "сообщение об ошибке должно переноситься на отдельную строку в редакторе");
+const customTimeInput = customTimeForm.querySelector("select");
+customTimeInput.dispatchEvent(new window.Event("invalid"));
+await settle(2, 40);
+const customTimeError = customTimeForm.querySelector(".custom-time-editor-error");
+assert.ok(customTimeError, "при некорректном времени редактор должен показать сообщение об ошибке");
+assert.equal(window.getComputedStyle(customTimeError).minWidth, "0px", "сообщение об ошибке должно сжиматься по ширине редактора");
+nativeSelSetter.call(customTimeInput, "06:05");
+customTimeInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+customTimeForm.querySelector('button[type="submit"]').click();
+await settle(6, 100);
+const addedTimeRow = [...window.document.querySelectorAll(".row-time")].find((row) => row.querySelector("span")?.textContent === "06:05");
+assert.ok(addedTimeRow, "сохранённое пользовательское время должно добавить строку");
+assert.ok(addedTimeRow.classList.contains("row-time-added"), "новая строка должна получить временную подсветку");
+assert.equal(addedTimeRow.querySelectorAll(".row-time-actions button").length, 2, "кнопки − и + должны стоять рядом в одной группе");
+assert.equal(window.getComputedStyle(addedTimeRow.querySelector(".row-time-actions")).gap, "0px", "кнопки − и + должны быть расположены вплотную");
+const deletedTimeButton = addedTimeRow.querySelector(".row-time-delete");
+assert.ok(deletedTimeButton, "удалять можно именно добавленную временную строку");
+window.confirm = () => true;
+deletedTimeButton.click();
+await settle(6, 100);
+window.confirm = origConfirm;
+assert.ok(![...window.document.querySelectorAll(".row-time")].some((row) => row.querySelector("span")?.textContent === "06:05"), "удаление должно убирать строку вместе с заголовком времени");
+assert.ok(!db.weekCustomTimes[startupMondayIso]?.includes(365), "удаление должно убрать время из сохранённых пользовательских строк");
+const rowUndoButton = [...window.document.querySelectorAll("button")].find((button) => button.title?.includes("Отменить последнее действие"));
+rowUndoButton.click();
+await settle(6, 100);
+assert.ok(db.weekCustomTimes[startupMondayIso]?.includes(365), "Undo должен восстановить пользовательскую строку времени");
+assert.ok([...window.document.querySelectorAll(".row-time")].some((row) => row.querySelector("span")?.textContent === "06:05"), "Undo должен вернуть строку в сетку");
 
 console.log("\n=== заливка клетки категорией (paint) ===");
 const catBtn = [...window.document.querySelectorAll("button")].find(b => b.title && b.title.includes("Категории ("));
@@ -603,6 +649,35 @@ const paintedCellDate = mondayPlusDays(paintedWeekIso, Number(paintedDayIdx));
 const changedCategory = (db.intervalsByDate[paintedCellDate] || []).find((item) => item.color);
 assert.equal(changedCategory?.catId, "c2", "перекраска заголовка должна менять ID категории");
 assert.equal(changedCategory?.text, "Работа", "перекраска заголовка должна менять текст на название новой категории");
+const paintedRowIdx = Number(cell.querySelector("[data-cell-input]").dataset.cellInput.split("_")[2]);
+const nextPaintCell = [...window.document.querySelectorAll(".cell")].find((candidate) => (
+  candidate.dataset.weekIso === paintedWeekIso
+  && candidate.dataset.dayIdx === paintedDayIdx
+  && Number(candidate.dataset.rowIdx) === paintedRowIdx + 1
+));
+assert.ok(nextPaintCell, "рядом по времени должна быть следующая клетка того же дня");
+nextPaintCell.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
+await settle(5, 150);
+assert.equal(nextPaintCell.querySelector("[data-cell-input$='_main']")?.value, "", "повторное нанесение той же категории в соседнюю клетку не должно создавать второй заголовок");
+const nextRowTime = nextPaintCell.closest(".week-card").querySelectorAll(".row-time")[paintedRowIdx + 1].querySelector("span").textContent;
+const [nextHour, nextMinute] = nextRowTime.split(":").map(Number);
+assert.equal((db.intervalsByDate[paintedCellDate] || []).find((item) => item.startMin === nextHour * 60 + nextMinute)?.text, "", "в соседней клетке должна сохраниться заливка без повторного заголовка");
+const thirdPaintCell = [...window.document.querySelectorAll(".cell")].find((candidate) => (
+  candidate.dataset.weekIso === paintedWeekIso
+  && candidate.dataset.dayIdx === paintedDayIdx
+  && Number(candidate.dataset.rowIdx) === paintedRowIdx + 2
+));
+assert.ok(thirdPaintCell, "для проверки разрыва должна быть ещё одна соседняя клетка");
+thirdPaintCell.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
+await settle(5, 150);
+const eraseModeButton = [...window.document.querySelectorAll(".segmented-option")].find((button) => button.textContent.includes("Ластик"));
+eraseModeButton.click();
+nextPaintCell.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
+await settle(5, 150);
+assert.equal(thirdPaintCell.querySelector("[data-cell-input$='_main']")?.value, "Работа", "после стирания средней клетки у отделившегося интервала должен появиться заголовок");
+const paintModeButton = [...window.document.querySelectorAll(".segmented-option")].find((button) => button.textContent.includes("Заливка"));
+paintModeButton.click();
+await settle(2, 40);
 
 console.log("\n=== повторный клик той же краской - должен стереть (toggle) ===");
 cell.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
@@ -842,13 +917,31 @@ assert.equal(clearRailButton.querySelector(".keytip-badge")?.textContent, "E", "
 window.dispatchEvent(new window.KeyboardEvent("keyup", { key: "Alt", code: "AltLeft", bubbles: true }));
 window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "E", code: "KeyE", bubbles: true }));
 await settle(2, 50);
-assert.ok(window.document.querySelector(".clear-range-panel"), "клавиша E должна открывать панель очистки");
+const initialClearPanel = window.document.querySelector(".clear-range-panel");
+assert.ok(initialClearPanel, "клавиша E должна открывать панель очистки");
+const initialClearModes = [...initialClearPanel.querySelectorAll(".clear-range-mode-grid button")];
+assert.equal(initialClearModes.find((button) => button.textContent.trim() === "Произвольный")?.getAttribute("aria-pressed"), "true", "произвольный режим должен быть выбран по умолчанию");
+initialClearModes.find((button) => button.textContent.trim() === "Неделя").click();
+await settle(2, 50);
 assert.ok(window.document.querySelector(".week-tiles-grid"), "режим очистки недели должен включать масштаб Week tiles");
 const selectableWeek = window.document.querySelector(".week-tile");
 const selectedWeekIso = selectableWeek.dataset.weekIso;
-selectableWeek.querySelector(".week-tile-main").click();
+const selectableWeekCheckbox = selectableWeek.querySelector(".week-tile-checkbox");
+assert.ok(selectableWeekCheckbox, "режим очистки недели должен показывать чекбокс на каждой плитке");
+assert.equal(selectableWeek.querySelector(".week-tile-number-input"), null, "название недели нельзя редактировать во время очистки");
+selectableWeekCheckbox.click();
 await settle(2, 50);
 assert.ok(window.document.querySelector(".clear-range-panel .clear-range-summary").textContent.includes(selectedWeekIso), "выбранная плитка должна задать неделю для очистки");
+assert.equal(selectableWeek.querySelectorAll(".week-tile-checkbox").length, 1, "для выбора недели должна быть одна галочка");
+assert.equal(selectableWeek.querySelector(".week-tile-checkbox").checked, true, "чекбокс выбранной недели должен быть отмечен");
+assert.equal(selectableWeek.querySelector(".week-tile-open"), null, "в режиме очистки не должно быть второй кнопки с дублирующей галочкой");
+const anotherSelectableWeek = [...window.document.querySelectorAll(".week-tile")].find((tile) => tile.dataset.weekIso !== selectedWeekIso);
+anotherSelectableWeek.querySelector(".week-tile-checkbox").click();
+await settle(2, 50);
+assert.ok(window.document.querySelector(`[data-week-iso="${selectedWeekIso}"]`).classList.contains("week-tile-selected"), "выбор второй недели должен сохранить предыдущую отметку");
+assert.ok(anotherSelectableWeek.classList.contains("week-tile-selected"), "недели должны выбираться одновременно");
+assert.ok(window.document.querySelector(".clear-range-panel .clear-range-summary").textContent.includes(anotherSelectableWeek.dataset.weekIso), "предварительный просмотр должен включать выбранную неделю");
+assert.ok(window.document.querySelector(".clear-range-panel .clear-range-summary").textContent.includes(selectedWeekIso), "предварительный просмотр должен включать обе выбранные недели");
 window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
 await settle(2, 50);
 clearRailButton.click();
@@ -856,23 +949,46 @@ await settle(2, 50);
 const clearPanel = window.document.querySelector(".clear-range-panel");
 assert.ok(clearPanel, "кнопка рельса должна открывать инструмент выбора периода");
 const clickClearMode = (mode) => [...clearPanel.querySelectorAll(".clear-range-mode-grid button")].find((button) => button.textContent.trim() === mode).click();
+assert.equal([...clearPanel.querySelectorAll(".clear-range-mode-grid button")].find((button) => button.textContent.trim() === "Произвольный")?.getAttribute("aria-pressed"), "true", "произвольный режим должен оставаться режимом по умолчанию при открытии инструмента");
 clickClearMode("Месяц");
 await settle(2, 50);
 assert.ok(window.document.querySelector(".tiles-grid"), "режим очистки месяца должен переключать календарь на месячный масштаб");
 assert.equal(window.document.querySelector(".week-tiles-grid"), null, "месячный масштаб не должен оставаться в режиме Week tiles");
-const monthSelect = clearPanel.querySelector(".clear-range-period-fields select");
-nativeSelSetter.call(monthSelect, "1");
-monthSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+const monthCheckboxes = [...window.document.querySelectorAll(".month-tile-select input[type=checkbox]")];
+const initiallySelectedMonth = monthCheckboxes.find((checkbox) => checkbox.checked);
+initiallySelectedMonth.click();
+const februaryCheckbox = monthCheckboxes.find((checkbox) => checkbox.closest("label").querySelector(".view-tile-name").textContent.trim() === "Февраль");
+assert.ok(februaryCheckbox, "месячный режим должен показывать чекбоксы на плитках месяцев");
+februaryCheckbox.click();
+await settle(2, 40);
 const clearYearInput = clearPanel.querySelector('input[type="number"]');
 nativeSetter.call(clearYearInput, "2028");
 clearYearInput.dispatchEvent(new window.Event("input", { bubbles: true }));
 clearYearInput.dispatchEvent(new window.Event("change", { bubbles: true }));
 await settle(2, 40);
-assert.ok(clearPanel.querySelector(".clear-range-summary").textContent.includes("2028-02-01 — 2028-02-29"), "месячный период должен корректно учитывать високосный февраль");
-clickClearMode("Год");
+assert.ok(clearPanel.querySelector(".clear-range-summary").textContent.includes("2028-02-01 — 2028-02-29"), "месячный период должен учитывать выбор месяца чекбоксом и високосный февраль");
+const januaryCheckbox = [...window.document.querySelectorAll(".month-tile-select input[type=checkbox]")].find((checkbox) => checkbox.closest("label").querySelector(".view-tile-name").textContent.trim() === "Январь");
+assert.ok(januaryCheckbox, "в месячном режиме должен быть доступен второй месяц");
+januaryCheckbox.click();
 await settle(2, 40);
+const monthPreview = clearPanel.querySelector(".clear-range-summary").textContent;
+assert.ok(monthPreview.includes("2028-01-01 — 2028-01-31") && monthPreview.includes("2028-02-01 — 2028-02-29"), "месячный режим должен принимать сразу несколько отмеченных месяцев");
+window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "4", code: "Digit4", ctrlKey: true, shiftKey: true, bubbles: true }));
+await settle(2, 40);
+assert.equal([...clearPanel.querySelectorAll(".clear-range-mode-grid button")].find((button) => button.textContent.trim() === "Год")?.getAttribute("aria-pressed"), "true", "Ctrl+Shift+4 должен быстро переключать очистку на годовой масштаб");
 assert.equal(window.document.querySelectorAll(".tiles-grid .view-tile").length >= 1, true, "режим очистки года должен переключать календарь на масштаб годов");
 assert.ok(clearPanel.querySelector(".clear-range-summary").textContent.includes("2028-01-01 — 2028-12-31"), "годовой период должен охватывать весь выбранный год");
+const clearYearCheckboxes = [...window.document.querySelectorAll(".year-tile-select input[type=checkbox]")];
+assert.ok(clearYearCheckboxes.some((checkbox) => checkbox.checked), "в годовом режиме выбранные годы должны быть отмечены чекбоксами прямо на плитках");
+const anotherClearYear = clearYearCheckboxes.find((checkbox) => !checkbox.checked);
+assert.ok(anotherClearYear, "в годовом режиме должен быть доступен чекбокс для выбора ещё одного года");
+anotherClearYear.click();
+await settle(2, 40);
+const additionalYear = Number(anotherClearYear.closest("label").querySelector(".view-tile-name").textContent);
+assert.ok(clearPanel.querySelector(".clear-range-summary").textContent.includes(`${additionalYear}-01-01 — ${additionalYear}-12-31`), "чекбокс года должен добавлять его в предварительный просмотр диапазона");
+anotherClearYear.click();
+await settle(2, 40);
+assert.ok(!clearPanel.querySelector(".clear-range-summary").textContent.includes(`${additionalYear}-01-01 — ${additionalYear}-12-31`), "снятие чекбокса должно удалять год из предварительного просмотра");
 clickClearMode("Произвольный");
 await settle(2, 40);
 const dateInputs = clearPanel.querySelectorAll('input[type="date"]');

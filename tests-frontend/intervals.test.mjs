@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { EMPTY_CELL, findIntervalAt, readCellValue, applyPatchLocally, clearRangeLocally, isEmptyContent, buildAgendaEventsFromIntervals, daysToTemplateIntervals, dayToTemplateIntervals, isSameBrushRun, brushHeaderKey, resolveBrushRunHeader, shouldHideRepeatedHeader } from "./intervals.mjs";
+import { EMPTY_CELL, findIntervalAt, readCellValue, applyPatchLocally, clearRangeLocally, isEmptyContent, buildAgendaEventsFromIntervals, daysToTemplateIntervals, dayToTemplateIntervals, isSameBrushRun, resolveBrushRunHeader, shouldHideRepeatedHeader, findNextBrushHeaderCell } from "./intervals.mjs";
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -91,7 +91,7 @@ test("заголовок остаётся одним в непрерывном �
   const continuation = iv(570, 600, { color: "#A8552E", catId: "work", task: "иная метаинформация" });
   const repeatedTitle = iv(600, 630, { text: "Работа", color: "#A8552E", catId: "work" });
   assert.equal(isSameBrushRun(first, continuation, 570), true);
-  assert.equal(isSameBrushRun(continuation, repeatedTitle, 600), true);
+  assert.equal(isSameBrushRun(continuation, repeatedTitle, 600, "Работа"), true);
   assert.equal(isSameBrushRun(first, repeatedTitle, 600), false, "разрыв между интервалами не считается непрерывным");
   assert.equal(isSameBrushRun(first, iv(570, 600, { color: "#2E7D74", catId: "work" }), 570), false);
   assert.equal(shouldHideRepeatedHeader(continuation, repeatedTitle, 600, "Работа"), true);
@@ -99,19 +99,30 @@ test("заголовок остаётся одним в непрерывном �
   assert.equal(shouldHideRepeatedHeader(first, repeatedTitle, 600, "Работа"), false);
 });
 
-test("после стирания клетки заголовок повторяется в новом фрагменте той же заливки", () => {
-  const brush = { color: "#A8552E", catId: "work", subId: null };
-  const first = iv(540, 570, { text: "Работа", ...brush });
-  const continuation = iv(570, 600, { ...brush });
-  const gap = EMPTY_CELL;
-  const splitContinuation = iv(630, 660, { ...brush });
-  const headers = new Map();
-  headers.set(brushHeaderKey(first), first.text);
+test("название категории не дублируется после ячейки-продолжения той же кисти", () => {
+  const continuation = iv(570, 600, { color: "#A8552E", catId: "work" });
+  const repeatedCategoryTitle = iv(600, 630, { text: "Работа", color: "#A8552E", catId: "work" });
+  const priorTitle = iv(570, 600, { text: "Старый заголовок", color: "#A8552E", catId: "work" });
+  const distinctTitle = iv(600, 630, { text: "Встреча", color: "#A8552E", catId: "work" });
 
-  assert.equal(resolveBrushRunHeader(first, true, headers), "Работа");
-  assert.equal(resolveBrushRunHeader(continuation, false, headers), "");
-  assert.equal(resolveBrushRunHeader(gap, false, headers), "");
-  assert.equal(resolveBrushRunHeader(splitContinuation, true, headers), "Работа");
+  assert.equal(isSameBrushRun(continuation, repeatedCategoryTitle, 600, "Работа"), true);
+  assert.equal(isSameBrushRun(priorTitle, repeatedCategoryTitle, 600, "Работа"), true, "название той же категории не должно повторяться подряд из-за прошлого текста");
+  assert.equal(resolveBrushRunHeader(repeatedCategoryTitle, false), "");
+  assert.equal(shouldHideRepeatedHeader(continuation, repeatedCategoryTitle, 600, "Работа"), true);
+  assert.equal(isSameBrushRun(continuation, distinctTitle, 600, "Работа"), false, "другое название не должно скрываться как продолжение категории");
+});
+
+test("после стирания клетки заголовок повторяется в новом фрагменте той же заливки", () => {
+  const first = iv(540, 570, { text: "Работа", color: "#A8552E", catId: "work" });
+  const continuation = iv(570, 600, { color: "#A8552E", catId: "work" });
+  const afterGap = iv(630, 660, { color: "#A8552E", catId: "work" });
+  const differentBrush = iv(630, 660, { color: "#2E7D74", catId: "other" });
+
+  assert.equal(resolveBrushRunHeader(first, true), "Работа");
+  assert.equal(resolveBrushRunHeader(continuation, false), "");
+  assert.equal(resolveBrushRunHeader(EMPTY_CELL, false), "");
+  assert.equal(resolveBrushRunHeader(afterGap, true), "", "a header must not cross an empty cell");
+  assert.equal(resolveBrushRunHeader(differentBrush, true), "", "a header must not cross a color/category change");
 });
 
 
@@ -159,6 +170,30 @@ test("шаблон дня: dayIdx всегда 0", () => {
 test("шаблон: пустая неделя -> пустой список", () => {
   assert.deepEqual(daysToTemplateIntervals([[], [], [], [], [], [], []]), []);
   assert.deepEqual(daysToTemplateIntervals(undefined), []);
+});
+
+test("brush title moves to next cell when the first painted cell is erased", () => {
+  const day = [
+    iv(540, 570, { text: "Work", color: "#A8552E", catId: "work" }),
+    iv(570, 600, { color: "#A8552E", catId: "work" }),
+  ];
+  assert.deepEqual(findNextBrushHeaderCell(day, 540, 570), { startMin: 570, text: "Work" });
+  assert.equal(findNextBrushHeaderCell(day, 540, 600), null, "a longer interval keeps its title on the surviving remainder");
+  assert.equal(findNextBrushHeaderCell([day[0], { ...day[1], color: "#2E7D74" }], 540, 570), null, "do not move a title across a color change");
+});
+
+test("erasing a middle cell carries the title to the detached continuation", () => {
+  const day = [
+    iv(540, 570, { text: "Work", color: "#A8552E", catId: "work" }),
+    iv(570, 660, { color: "#A8552E", catId: "work" }),
+  ];
+  const carry = findNextBrushHeaderCell(day, 600, 630);
+  assert.deepEqual(carry, { startMin: 630, text: "Work" });
+
+  const split = clearRangeLocally(day, 600, 630);
+  assert.equal(readCellValue(split, 630).text, "");
+  const reheaded = applyPatchLocally(split, 630, 660, { text: carry.text });
+  assert.equal(readCellValue(reheaded, 630).text, "Work");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

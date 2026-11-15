@@ -54,6 +54,12 @@ export async function fetchWeekQuantum(monday) {
 export async function saveWeekQuantum(monday, cellMin) {
   return invoke("cmd_set_week_quantum", { monday, cellMin });
 }
+export async function saveWeekCustomTimes(monday, times) {
+  return invoke("cmd_set_week_custom_times", { monday, times });
+}
+export async function preserveGlobalQuantumConflicts(dayStart, quantum) {
+  return invoke("cmd_preserve_global_quantum_conflicts", { dayStart, quantum });
+}
 
 export async function fetchWeekDayBounds(monday) {
   return invoke("cmd_get_week_day_bounds", { monday });
@@ -286,6 +292,9 @@ export async function listCreatedYears() {
 }
 export async function addCreatedYear(year) {
   return invoke("cmd_add_created_year", { year });
+}
+export async function deleteCreatedYear(year) {
+  return invoke("cmd_delete_created_year", { year });
 }
 
 /* ---------- Подписи недель (WeekTiles.jsx) ---------- */
